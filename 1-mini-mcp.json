@@ -1,0 +1,70 @@
+{
+  "name": "FinRL - Financial Reinforcement Learning Framework",
+  "description": "Deep reinforcement learning framework for automated trading in quantitative finance with three-layer architecture (environments, agents, applications)",
+  "type": "python-ml-finance",
+  "file_structure": {
+    "finrl/": "Main package with train-test-trade pipeline",
+    "finrl/main.py": "CLI entry point with mode selection (train/test/trade)",
+    "finrl/train.py": "Train DRL models on historical data",
+    "finrl/test.py": "Backtest trained models",
+    "finrl/trade.py": "Live/paper trading deployment",
+    "finrl/config.py": "Global configuration (dates, parameters, directories)",
+    "finrl/meta/": "Core infrastructure layer",
+    "finrl/meta/data_processor.py": "Unified data source interface",
+    "finrl/meta/data_processors/": "Specific data source implementations (Yahoo, Alpaca, WRDS, etc.)",
+    "finrl/meta/env_stock_trading/": "Stock trading gym environments",
+    "finrl/meta/env_portfolio_*/": "Portfolio optimization environments",
+    "finrl/agents/": "DRL algorithm wrappers",
+    "finrl/agents/elegantrl/": "ElegantRL integration (default)",
+    "finrl/agents/stablebaselines3/": "Stable-Baselines3 integration",
+    "finrl/agents/rllib/": "RLLib integration",
+    "finrl/applications/": "Ready-to-use trading strategies",
+    "examples/": "Jupyter notebook demos and tutorials",
+    "unit_tests/": "Test suite using pytest framework"
+  },
+  "important_files": [
+    "finrl/main.py",
+    "finrl/config.py", 
+    "finrl/train.py",
+    "finrl/test.py",
+    "finrl/meta/data_processor.py",
+    "finrl/meta/env_stock_trading/env_stocktrading.py",
+    "requirements.txt",
+    "pyproject.toml",
+    ".pre-commit-config.yaml"
+  ],
+  "run_instructions": {
+    "install": "pip install -e . or poetry install",
+    "train_model": "python finrl/main.py --mode=train",
+    "test_model": "python finrl/main.py --mode=test", 
+    "paper_trade": "python finrl/main.py --mode=trade (requires API keys)",
+    "run_tests": "pytest",
+    "format_code": "pre-commit run --all-files",
+    "lint": "flake8 finrl/",
+    "format": "black finrl/",
+    "sort_imports": "isort finrl/"
+  },
+  "architecture": {
+    "type": "Three-layer framework",
+    "layers": {
+      "meta": "Market environments and data processing infrastructure",
+      "agents": "DRL algorithm implementations (ElegantRL, SB3, RLLib)",
+      "applications": "Domain-specific trading applications"
+    },
+    "pipeline": "train-test-trade workflow",
+    "data_sources": "YahooFinance, Alpaca, WRDS, CCXT and others",
+    "environments": "Gym-style trading environments for different scenarios"
+  },
+  "technologies": [
+    "Python 3.7+",
+    "PyTorch/TensorFlow", 
+    "OpenAI Gym/Gymnasium",
+    "ElegantRL",
+    "Stable-Baselines3",
+    "RLLib",
+    "pandas",
+    "numpy",
+    "stockstats"
+  ],
+  "testing_framework": "pytest with pre-commit hooks"
+}

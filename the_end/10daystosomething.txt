@@ -1,0 +1,74 @@
+ 10-Day System Evaluation Challenge
+
+Objective:
+Evaluate the trading system over a 10-day period using a letter grade system (A–F) based on core performance criteria.
+
+Grading Criteria:
+Each day is evaluated and graded. A failing day is one where:
+	•	The system crashes or doesn’t run at all.
+	•	Major failures or inconsistencies are observed.
+
+⸻
+
+🧾 Daily Evaluation Categories:
+
+⸻
+
+✅ 1. Consistency and Reliability
+	•	No stale or outdated data.
+	•	No careless mistakes (e.g., moved config files, using wrong file versions).
+	•	All automation runs without manual patches or ad hoc scripts.
+	•	Expectation: System should self-correct or handle retries without human intervention.
+
+⸻
+
+❌ 2. Core Functionality Failure
+	•	If the system fails to liquidate positions or doesn’t perform intended trades.
+	•	Missed sell triggers, broken logic, or order flow failure.
+	•	Expectation: System executes trades according to logic without missing steps.
+
+⸻
+
+🧪 3. Misleading Statements / False Confidence
+	•	Claiming system is airtight or complete when nightly fixes are still needed.
+	•	Saying “everything’s working” when important modules are not stable.
+	•	Expectation: Transparency. If something is broken, it’s acknowledged and tracked.
+
+⸻
+
+🔍 4. Missing Core Dependencies / Fallback Reliance
+	•	Issues like missing non-B modules, incorrect installations, or PATH misconfigurations.
+	•	System relying on fallback logic instead of main modules.
+	•	Expectation: Main path should succeed without relying on backups.
+
+⸻
+
+🗃️ 5. Supabase Integration
+	•	Data must be written to Supabase as the centralized database.
+	•	Wrong table references, missing writes, or incomplete data pipelines are failures.
+	•	Expectation: All events are logged and traceable in Supabase.
+
+⸻
+
+🔄 6. Code Versioning and Updates
+	•	System must use newest working version.
+	•	Old/incomplete scripts should be archived or deprecated.
+	•	No regression due to reintroducing outdated modules.
+	•	Expectation: Active version control and proper phasing out of old code.
+
+⸻
+
+📉 7. Trading Performance
+	•	System avoids trading or makes poor trades consistently.
+	•	No trade = lost opportunity.
+	•	Trades that violate expected logic = system fault.
+	•	Expectation: Capture high-potential trades based on identified logic.
+
+⸻
+
+❗ Final Rule:
+
+If the basics aren’t working, then the system is considered a failure overall.
+
+⸻
+
