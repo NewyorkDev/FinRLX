@@ -420,9 +420,12 @@ class TradingDashboard {
                             <td>${stock.dts_score || 'N/A'}</td>
                             <td>${(stock.v9b_confidence * 10).toFixed(1) || 'N/A'}</td>
                             <td><span class="signal signal-hold">HOLD</span></td>
-                            <td><button class="action-btn">Analyze</button></td>
+                            <td><button class="action-btn" onclick="window.dashboard.analyzeStock('${stock.ticker || stock.symbol}')">Analyze</button></td>
                         </tr>
                     `).join('');
+                    
+                    // Store reference for global access
+                    window.dashboard = this;
                 }
             }
             
@@ -491,6 +494,52 @@ class TradingDashboard {
                 console.error('Emergency stop error:', error);
                 alert('Error activating emergency stop');
             }
+        }
+    }
+
+    async analyzeStock(ticker) {
+        try {
+            this.addActivity(`Analyzing ${ticker}...`);
+            
+            // Fetch detailed analysis for the stock
+            const response = await fetch(`/analyze-stock?ticker=${ticker}`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            
+            const analysis = await response.json();
+            
+            // Display analysis in a modal or alert
+            const analysisText = `
+📊 ANALYSIS FOR ${ticker.toUpperCase()}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 DTS Score: ${analysis.dts_score || 'N/A'}
+🔮 V9B Confidence: ${analysis.v9b_confidence || 'N/A'}
+🤖 ML Signal: ${analysis.ml_signal || 'N/A'}
+💹 Current Price: $${analysis.current_price || 'N/A'}
+
+📈 Technical Indicators:
+• RSI: ${analysis.rsi || 'N/A'}
+• MACD: ${analysis.macd_signal || 'N/A'}
+• Volume: ${analysis.volume_status || 'N/A'}
+
+🎲 Recommendation: ${analysis.recommendation || 'HOLD'}
+📋 Risk Level: ${analysis.risk_level || 'MEDIUM'}
+
+💡 AI Analysis:
+${analysis.claude_analysis || 'No detailed analysis available'}
+            `.trim();
+            
+            // Show in alert for now (could be enhanced with a proper modal later)
+            alert(analysisText);
+            
+            this.addActivity(`Analysis complete for ${ticker}`);
+            
+        } catch (error) {
+            console.error('Stock analysis error:', error);
+            alert(`Failed to analyze ${ticker}: ${error.message}`);
+            this.addActivity(`Analysis failed for ${ticker}`);
         }
     }
 

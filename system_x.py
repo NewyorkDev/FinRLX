@@ -120,14 +120,13 @@ except ImportError as e:
     if "No module named 'polygon'" not in str(e):
         print(f"⚠️ Polygon not available: {e}")
 
-# Import Flask for monitoring endpoint
+# Import Redis for communication with API layer
 try:
-    from flask import Flask, jsonify, request
-    FLASK_AVAILABLE = True
+    import redis
+    REDIS_AVAILABLE = True
 except ImportError as e:
-    FLASK_AVAILABLE = False
-    if "No module named 'flask'" not in str(e):
-        print(f"⚠️ Flask not available: {e}")
+    REDIS_AVAILABLE = False
+    print(f"⚠️ Redis not available: {e}")
 
 # Check for gymnasium/gym availability
 try:
@@ -289,9 +288,19 @@ class SystemX:
         self.consecutive_losses = 0
         self.emergency_conditions = []
         
-        # Trade journal
+        # Trade journal with thread safety
         self.trade_journal = []
+        self.trade_journal_lock = threading.Lock()
         self.pattern_analysis = {}
+        
+        # Redis communication
+        self.redis_client = None
+        self.redis_pubsub = None
+        
+        # Performance improvements
+        self.consecutive_errors = 0
+        self.error_backoff_time = 30  # Start with 30 seconds
+        self.last_cache_clear = datetime.now()
         
         # Configuration will be loaded after method definitions
         
@@ -305,7 +314,7 @@ class SystemX:
             self.setup_connections()
             self.setup_connection_pool()
             self.initialize_supabase_tables()
-            self.create_monitoring_endpoint()
+            self.setup_redis_communication()
             
             # Load previous performance metrics for continuity
             self.load_performance_metrics()
@@ -322,8 +331,8 @@ class SystemX:
             else:
                 feature_status.append("🤖 ML: Basic")
                 
-            if FLASK_AVAILABLE:
-                feature_status.append("🔍 Monitoring: HTTP Enabled")
+            if REDIS_AVAILABLE:
+                feature_status.append("🔍 Monitoring: Redis Enabled")
             else:
                 feature_status.append("🔍 Monitoring: Local Only")
                 
@@ -391,6 +400,12 @@ class SystemX:
                 'name': 'TERTIARY_30K'
             }
         ]
+        
+        # Track starting equity for each account
+        self.starting_equity = {}
+        
+        # Current account index for round-robin trading
+        self.current_account_index = 0
         
         if self.debug:
             print("🔑 Environment loaded - All credentials secured")
@@ -494,12 +509,32 @@ class SystemX:
             account = self.alpaca.get_account()
             self.account_balance = float(account.equity)
             
-            # Setup additional accounts
+            # Setup additional accounts and track starting equity (skip primary which is already set up)
             self.alpaca_clients = []
             for acc in self.alpaca_accounts:
+                # Skip primary account since it's already set up as self.alpaca
+                if acc['name'] == 'PRIMARY_30K':
+                    # Just track starting equity for primary account
+                    self.starting_equity['PRIMARY_30K'] = self.account_balance
+                    continue
+                    
                 if acc['key'] and acc['secret']:
-                    client = tradeapi.REST(acc['key'], acc['secret'], self.alpaca_base_url, api_version='v2')
-                    self.alpaca_clients.append({'client': client, 'name': acc['name']})
+                    try:
+                        client = tradeapi.REST(acc['key'], acc['secret'], self.alpaca_base_url, api_version='v2')
+                        account_info = client.get_account()
+                        starting_balance = float(account_info.equity)
+                        
+                        self.alpaca_clients.append({'client': client, 'name': acc['name']})
+                        self.starting_equity[acc['name']] = starting_balance
+                        
+                        if self.debug:
+                            print(f"   {acc['name']}: ${starting_balance:,.2f} ({account_info.status})")
+                            
+                    except Exception as e:
+                        print(f"⚠️ Failed to setup {acc['name']}: {e}")
+                        continue
+                else:
+                    print(f"⚠️ Missing credentials for {acc.get('name', 'unknown account')}")
             
             # Setup Polygon client for historical data
             self.polygon_available = POLYGON_AVAILABLE
@@ -519,7 +554,8 @@ class SystemX:
             print(f"✅ All connections established")
             print(f"   Supabase: Connected to V9B database")
             print(f"   Alpaca Primary: ${self.account_balance:,.2f} ({account.status})")
-            print(f"   Additional Accounts: {len(self.alpaca_clients)} available")
+            print(f"   Additional Accounts: {len(self.alpaca_clients)} configured")
+            print(f"   Total Starting Equity: ${sum(self.starting_equity.values()):,.2f}")
             print(f"   Polygon: {'✅ Connected' if polygon_connected else '❌ Failed'} (5yr historical data)")
             
         except Exception as e:
@@ -546,15 +582,76 @@ class SystemX:
         except Exception as e:
             print(f"⚠️ Connection pool setup warning: {e}")
     
-    def get_pooled_connection(self):
-        """Get next available connection from pool"""
+    def get_client(self, account_name: str = "PRIMARY_30K"):
+        """Get the correct client object for any action"""
         try:
-            if self.connection_pool.get('secondary'):
-                self.current_connection_index = (self.current_connection_index + 1) % len(self.connection_pool['secondary'])
-                return self.connection_pool['secondary'][self.current_connection_index]
-            return self.connection_pool.get('primary', self.alpaca)
-        except Exception:
-            return self.alpaca
+            if account_name == "PRIMARY_30K":
+                return self.alpaca
+            
+            for acc in self.alpaca_clients:
+                if acc["name"] == account_name:
+                    return acc["client"]
+            
+            raise ValueError(f"No such account: {account_name}")
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Client lookup error for {account_name}: {e}")
+            return self.alpaca  # Fallback to primary
+    
+    def get_next_available_account(self) -> str:
+        """Get next available account for trading using round-robin with day-trade checking"""
+        try:
+            # Check all accounts for day trade availability and cash
+            available_accounts = []
+            
+            # Check primary account first
+            try:
+                account_info = self.alpaca.get_account()
+                day_trade_count = getattr(account_info, 'day_trade_count', 0)
+                available_cash = float(account_info.cash)
+                
+                if day_trade_count < 3 and available_cash > 1000:  # Minimum $1000 cash buffer
+                    available_accounts.append("PRIMARY_30K")
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️ Error checking PRIMARY account: {e}")
+            
+            # Check additional accounts
+            for acc in self.alpaca_clients:
+                account_name = acc['name']
+                try:
+                    client = acc['client']
+                    account_info = client.get_account()
+                    
+                    # Check day trade count
+                    day_trade_count = getattr(account_info, 'day_trade_count', 0)
+                    available_cash = float(account_info.cash)
+                    
+                    if day_trade_count < 3 and available_cash > 1000:  # Minimum $1000 cash buffer
+                        available_accounts.append(account_name)
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ Error checking account {account_name}: {e}")
+                    continue
+            
+            if available_accounts:
+                # Round-robin selection
+                selected = available_accounts[self.current_account_index % len(available_accounts)]
+                self.current_account_index += 1
+                return selected
+            else:
+                # Fallback to primary if no accounts available
+                return "PRIMARY_30K"
+                
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Error getting next account: {e}")
+            return "PRIMARY_30K"
+    
+    def get_pooled_connection(self):
+        """Legacy method - use get_client instead"""
+        return self.get_client()
     
     def setup_trading_parameters(self):
         """Setup comprehensive trading and backtesting parameters"""
@@ -927,14 +1024,21 @@ class SystemX:
             self.log_system_event("OPPORTUNITY_ERROR", f"Error evaluating {ticker}: {e}")
             return False
     
-    def execute_trade(self, ticker: str, shares: int, action: str, price: float, reason: str) -> bool:
-        """Execute trade with comprehensive logging"""
+    def execute_trade(self, ticker: str, shares: int, action: str, price: float, reason: str, account_name: str = None) -> bool:
+        """Execute trade with comprehensive logging across all accounts"""
         try:
             if shares <= 0:
                 return False
             
+            # Determine which account to use
+            if account_name is None:
+                account_name = self.get_next_available_account()
+            
+            # Get the appropriate client
+            client = self.get_client(account_name)
+            
             # Execute the order
-            order = self.alpaca.submit_order(
+            order = client.submit_order(
                 symbol=ticker,
                 qty=shares,
                 side=action,
@@ -956,11 +1060,11 @@ class SystemX:
                 'price': price,
                 'total_value': trade_value,
                 'reason': reason,
-                'account_name': 'PRIMARY_30K',
+                'account_name': account_name,
                 'pnl': 0  # Will be calculated on exit
             }
             
-            # Add to trade journal for pattern analysis
+            # Add to trade journal for pattern analysis (thread-safe)
             journal_entry = {
                 'timestamp': datetime.now(),
                 'ticker': ticker,
@@ -972,7 +1076,8 @@ class SystemX:
                 'trade_id': order.id,
                 'return_pct': 0  # Will be updated on exit
             }
-            self.trade_journal.append(journal_entry)
+            with self.trade_journal_lock:
+                self.trade_journal.append(journal_entry)
             
             try:
                 self.supabase.table('trade_execution_logs').insert(trade_log).execute()
@@ -981,13 +1086,13 @@ class SystemX:
             
             # Console output
             action_emoji = "🟢" if action == 'buy' else "🔴"
-            print(f"{action_emoji} {action.upper()} {shares} shares of {ticker} @ ${price:.2f}")
+            print(f"{action_emoji} {action.upper()} {shares} shares of {ticker} @ ${price:.2f} ({account_name})")
             print(f"   Value: ${trade_value:,.0f} | Reason: {reason}")
             
             # Slack notification for significant trades
             if trade_value > 1000:
                 self.send_slack_notification(f"{action_emoji} Trade Executed", 
-                    f"{action.upper()} {shares} {ticker} @ ${price:.2f}\nValue: ${trade_value:,.0f}\nReason: {reason}")
+                    f"{action.upper()} {shares} {ticker} @ ${price:.2f}\nAccount: {account_name}\nValue: ${trade_value:,.0f}\nReason: {reason}")
             
             return True
             
@@ -997,26 +1102,69 @@ class SystemX:
             return False
     
     def get_current_positions(self) -> Dict:
-        """Get current positions with enhanced details"""
+        """Get current positions across all accounts with enhanced details"""
         try:
-            positions = self.alpaca.list_positions()
-            current_positions = {}
+            all_positions = {}
             
-            for position in positions:
-                market_value = float(position.market_value)
-                unrealized_pl = float(position.unrealized_pl)
-                
-                current_positions[position.symbol] = {
-                    'qty': int(float(position.qty)),
-                    'market_value': market_value,
-                    'unrealized_pl': unrealized_pl,
-                    'unrealized_pl_pct': (unrealized_pl / market_value) * 100 if market_value > 0 else 0,
-                    'avg_entry_price': float(position.avg_entry_price),
-                    'current_price': float(position.current_price) if hasattr(position, 'current_price') else 0,
-                    'side': position.side
-                }
+            # Get positions from primary account
+            try:
+                positions = self.alpaca.list_positions()
+                for position in positions:
+                    try:
+                        market_value = float(position.market_value)
+                        unrealized_pl = float(position.unrealized_pl)
+                        
+                        position_key = f"{position.symbol}_PRIMARY_30K"
+                        all_positions[position_key] = {
+                            'symbol': position.symbol,
+                            'account_name': 'PRIMARY_30K',
+                            'qty': int(float(position.qty)),
+                            'market_value': market_value,
+                            'unrealized_pl': unrealized_pl,
+                            'unrealized_pl_pct': (unrealized_pl / market_value) * 100 if market_value > 0 else 0,
+                            'avg_entry_price': float(position.avg_entry_price),
+                            'current_price': float(position.current_price) if hasattr(position, 'current_price') else 0,
+                            'side': position.side
+                        }
+                    except Exception as pos_error:
+                        if self.debug:
+                            print(f"⚠️ Error processing PRIMARY position {position.symbol}: {pos_error}")
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️ Error fetching PRIMARY account positions: {e}")
             
-            return current_positions
+            # Get positions from additional accounts
+            for acc_client in self.alpaca_clients:
+                try:
+                    client = acc_client['client']
+                    account_name = acc_client['name']
+                    positions = client.list_positions()
+                    
+                    for position in positions:
+                        try:
+                            market_value = float(position.market_value)
+                            unrealized_pl = float(position.unrealized_pl)
+                            
+                            position_key = f"{position.symbol}_{account_name}"
+                            all_positions[position_key] = {
+                                'symbol': position.symbol,
+                                'account_name': account_name,
+                                'qty': int(float(position.qty)),
+                                'market_value': market_value,
+                                'unrealized_pl': unrealized_pl,
+                                'unrealized_pl_pct': (unrealized_pl / market_value) * 100 if market_value > 0 else 0,
+                                'avg_entry_price': float(position.avg_entry_price),
+                                'current_price': float(position.current_price) if hasattr(position, 'current_price') else 0,
+                                'side': position.side
+                            }
+                        except Exception as pos_error:
+                            if self.debug:
+                                print(f"⚠️ Error processing {account_name} position {position.symbol}: {pos_error}")
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ Error fetching {acc_client.get('name', 'unknown')} account positions: {e}")
+            
+            return all_positions
             
         except Exception as e:
             self.log_system_event("POSITION_ERROR", f"Error fetching positions: {e}")
@@ -1434,11 +1582,48 @@ class SystemX:
         """Generate cache key based on current time (refreshes every 10 minutes)"""
         return datetime.now().strftime('%Y%m%d_%H%M')[:12]  # 10-minute buckets
     
-    def check_day_trade_limit(self) -> bool:
-        """Check if we can make more day trades (PDT compliance)"""
+    def check_day_trade_limit(self, account_name: str = None) -> bool:
+        """Check if we can make more day trades across all accounts or specific account"""
         try:
-            # Get recent orders
-            orders = self.alpaca.list_orders(
+            if account_name:
+                # Check specific account
+                return self._check_account_day_trades(account_name)
+            
+            # Check all accounts
+            accounts_to_check = [acc['name'] for acc in self.alpaca_clients]
+            
+            for acc_name in accounts_to_check:
+                if self._check_account_day_trades(acc_name):
+                    return True  # At least one account can trade
+            
+            return False  # No accounts can day trade
+            
+        except Exception as e:
+            self.log_system_event("DAY_TRADE_CHECK_ERROR", f"Error checking day trade limit: {e}")
+            return True  # Conservative: allow trading if can't check
+    
+    def _check_account_day_trades(self, account_name: str) -> bool:
+        """Check day trade limit for specific account"""
+        try:
+            client = self.get_client(account_name)
+            
+            # First check account's day_trade_count attribute (more reliable)
+            try:
+                account = client.get_account()
+                day_trade_count = getattr(account, 'day_trade_count', 0)
+                can_trade = day_trade_count < self.max_day_trades
+                
+                if self.debug:
+                    print(f"📊 {account_name} day trade check: {day_trade_count}/{self.max_day_trades} (can trade: {can_trade})")
+                
+                return can_trade
+                
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️ Could not get account day_trade_count for {account_name}, checking orders: {e}")
+            
+            # Fallback: Get recent orders for this account
+            orders = client.list_orders(
                 status='filled',
                 after=(datetime.now() - timedelta(days=5)).isoformat()
             )
@@ -1462,12 +1647,13 @@ class SystemX:
             can_trade = day_trades_today < self.max_day_trades
             
             if self.debug:
-                print(f"📈 Day Trade Status: {day_trades_today}/{self.max_day_trades} (Can trade: {can_trade})")
+                print(f"📈 Day Trade Status {account_name}: {day_trades_today}/{self.max_day_trades} (Can trade: {can_trade})")
             
             return can_trade
             
         except Exception as e:
-            self.log_system_event("DAY_TRADE_CHECK_ERROR", f"Error checking day trade limit: {e}")
+            if self.debug:
+                print(f"⚠️ Day trade check error for {account_name}: {e}")
             return True  # Conservative: allow trading if can't check
     
     def manage_existing_positions(self, positions: Dict):
@@ -1933,200 +2119,493 @@ class SystemX:
         except Exception:
             return {}
     
-    def create_monitoring_endpoint(self):
-        """Create a simple HTTP endpoint for monitoring"""
+    def setup_redis_communication(self):
+        """Setup Redis communication for metrics publishing and command listening"""
         try:
-            if not FLASK_AVAILABLE or not getattr(self, 'enable_http_endpoint', True):
+            if not REDIS_AVAILABLE:
+                if self.debug:
+                    print("⚠️ Redis not available - using local logging only")
                 return
             
-            app = Flask(__name__)
-            app.logger.setLevel(40)  # Reduce Flask logging
+            # Redis configuration from environment
+            redis_host = os.getenv('REDIS_HOST', 'localhost')
+            redis_port = int(os.getenv('REDIS_PORT', 6379))
+            redis_password = os.getenv('REDIS_PASSWORD')
+            redis_ssl = os.getenv('REDIS_SSL', 'false').lower() == 'true'
             
-            # Dashboard route
-            @app.route('/')
-            def dashboard():
-                from flask import render_template
-                try:
-                    return render_template('dashboard.html')
-                except Exception as e:
-                    if self.debug:
-                        print(f"⚠️ Main dashboard failed, using simple fallback: {e}")
-                    return render_template('simple_dashboard.html')
-            
-            # Simple dashboard fallback route
-            @app.route('/simple')
-            def simple_dashboard():
-                from flask import render_template
-                return render_template('simple_dashboard.html')
-            
-            # Qualified stocks endpoint
-            @app.route('/qualified-stocks')
-            def qualified_stocks():
-                try:
-                    stocks = self.get_v9b_qualified_stocks()
-                    return jsonify(stocks)
-                except Exception as e:
-                    return jsonify([]), 500
-            
-            # Live data endpoint for real-time updates
-            @app.route('/live-data')
-            def live_data():
-                try:
-                    return jsonify({
-                        'timestamp': datetime.now().isoformat(),
-                        'account_equity': self.account_balance,
-                        'daily_pnl': 0,  # Placeholder
-                        'daily_pnl_pct': 0,
-                        'positions': self.get_current_positions(),
-                        'trading_signals': self.get_current_signals(),
-                        'market_open': self.is_market_open()
-                    })
-                except Exception as e:
-                    return jsonify({'error': str(e)}), 500
-            
-            @app.route('/health')
-            def health():
-                return jsonify(self.perform_health_check())
-            
-            @app.route('/metrics')
-            def metrics():
-                return jsonify({
-                    'performance': {
-                        'sharpe_ratio': self.sharpe_ratio,
-                        'sortino_ratio': self.sortino_ratio,
-                        'max_drawdown': self.max_drawdown,
-                        'var_95': self.var_95,
-                        'risk_adjustment': self.risk_adjustment_factor
-                    },
-                    'trading': {
-                        'trades_today': self.trade_count,
-                        'positions': len(self.get_current_positions()),
-                        'exposure': self.calculate_current_exposure(),
-                        'trading_enabled': self.trading_enabled
-                    },
-                    'ml_model': {
-                        'available': ML_AVAILABLE and self.ml_model is not None,
-                        'feature_importance': self.feature_importance
-                    },
-                    'strategy_performance': self.strategy_performance,
-                    'pattern_analysis': self.pattern_analysis
-                })
-            
-            @app.route('/emergency-stop', methods=['POST'])
-            def emergency_stop():
-                try:
-                    reason = request.json.get('reason', 'MANUAL_STOP') if request.json else 'MANUAL_STOP'
-                    self.emergency_stop(reason, "Manual emergency stop via API")
-                    return jsonify({'status': 'emergency stop activated'})
-                except Exception as e:
-                    return jsonify({'error': str(e)}), 500
-            
-            @app.route('/config', methods=['GET', 'POST'])
-            def config():
-                if request.method == 'GET':
-                    return jsonify({
-                        'max_position_size': self.max_position_size,
-                        'max_total_exposure': self.max_total_exposure,
-                        'stop_loss_pct': self.stop_loss_pct,
-                        'take_profit_pct': self.take_profit_pct,
-                        'kelly_enabled': self.kelly_enabled,
-                        'trading_enabled': self.trading_enabled
-                    })
-                else:
-                    try:
-                        config_updates = request.json
-                        if 'stop_loss_pct' in config_updates:
-                            self.stop_loss_pct = float(config_updates['stop_loss_pct'])
-                        if 'take_profit_pct' in config_updates:
-                            self.take_profit_pct = float(config_updates['take_profit_pct'])
-                        if 'trading_enabled' in config_updates:
-                            self.trading_enabled = bool(config_updates['trading_enabled'])
-                        
-                        return jsonify({'status': 'config updated'})
-                    except Exception as e:
-                        return jsonify({'error': str(e)}), 400
-            
-            # Run in separate thread with retry logic
-            def run_app():
-                port = 8080
-                max_retries = 5
-                retry_delay = 2
-                
-                for attempt in range(max_retries):
-                    try:
-                        if self.debug:
-                            print(f"🔍 Starting Flask server on port {port} (attempt {attempt + 1}/{max_retries})")
-                        
-                        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
-                        break  # Success
-                        
-                    except OSError as e:
-                        if "Address already in use" in str(e):
-                            if attempt < max_retries - 1:
-                                if self.debug:
-                                    print(f"⚠️ Port {port} in use, retrying in {retry_delay}s...")
-                                time.sleep(retry_delay)
-                                retry_delay *= 1.5  # Exponential backoff
-                                
-                                # Try to kill processes using the port
-                                try:
-                                    import subprocess
-                                    subprocess.run(['lsof', '-ti', f':{port}'], capture_output=True, check=False)
-                                    result = subprocess.run(['lsof', '-ti', f':{port}'], capture_output=True, text=True)
-                                    if result.stdout.strip():
-                                        pids = result.stdout.strip().split('\n')
-                                        for pid in pids:
-                                            try:
-                                                subprocess.run(['kill', '-9', pid], check=False)
-                                                if self.debug:
-                                                    print(f"🔧 Killed process {pid} using port {port}")
-                                            except:
-                                                pass
-                                except:
-                                    pass
-                            else:
-                                print(f"❌ Failed to start Flask server after {max_retries} attempts: {e}")
-                                return
-                        else:
-                            print(f"❌ Flask server error: {e}")
-                            return
-                    except Exception as e:
-                        print(f"❌ Unexpected Flask server error: {e}")
-                        return
-            
-            monitoring_thread = threading.Thread(target=run_app, daemon=True)
-            monitoring_thread.start()
-            
-            # Wait a moment to see if server started successfully
-            time.sleep(3)
-            
-            # Test if server is responding
             try:
-                import urllib.request
-                urllib.request.urlopen('http://localhost:8080/health', timeout=5)
+                # Setup Redis client with SSL support for Upstash
+                self.redis_client = redis.Redis(
+                    host=redis_host,
+                    port=redis_port,
+                    password=redis_password,
+                    ssl=redis_ssl,
+                    decode_responses=True,
+                    socket_timeout=5,
+                    socket_connect_timeout=5,
+                    retry_on_timeout=True
+                )
+                
+                # Test connection
+                self.redis_client.ping()
+                
                 if self.debug:
-                    print("✅ Flask server is responding to health checks")
+                    print(f"✅ Redis connected to {redis_host}:{redis_port}")
+                
             except Exception as e:
                 if self.debug:
-                    print(f"⚠️ Flask server may not be responding: {e}")
+                    print(f"⚠️ Remote Redis failed, trying local: {e}")
+                
+                # Fallback to local Redis
+                try:
+                    self.redis_client = redis.Redis(
+                        host='localhost',
+                        port=6379,
+                        decode_responses=True,
+                        socket_timeout=5
+                    )
+                    self.redis_client.ping()
+                    if self.debug:
+                        print("✅ Connected to local Redis fallback")
+                except Exception as fallback_error:
+                    if self.debug:
+                        print(f"❌ All Redis connections failed: {fallback_error}")
+                    self.redis_client = None
+                    return
+            
+            # Setup command listener in background thread
+            if self.redis_client:
+                self.setup_command_listener()
+                
+                # Start metrics publishing
+                self.start_metrics_publishing()
+                
+                if self.debug:
+                    print("🔧 Redis Communication Setup:")
+                    print("   ✅ Command listener active")
+                    print("   ✅ Metrics publishing enabled")
+                    print("   📡 API separation complete")
+                    
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Redis communication setup failed: {e}")
+            self.redis_client = None
+    
+    def setup_command_listener(self):
+        """Setup Redis pub/sub command listener"""
+        def listen_commands():
+            try:
+                pubsub = self.redis_client.pubsub()
+                pubsub.subscribe('systemx:commands')
+                
+                if self.debug:
+                    print("👂 Redis command listener started")
+                
+                for message in pubsub.listen():
+                    if message['type'] == 'message':
+                        try:
+                            command_data = json.loads(message['data'])
+                            command = command_data.get('command')
+                            
+                            if command == "EMERGENCY_STOP":
+                                reason = command_data.get('reason', 'REDIS_STOP')
+                                details = command_data.get('details', 'Emergency stop via Redis')
+                                self.emergency_stop(reason, details)
+                                
+                            elif command == "UPDATE_CONFIG":
+                                updates = command_data.get('updates', {})
+                                self.apply_config_updates(updates)
+                                
+                            if self.debug:
+                                print(f"📨 Received command: {command}")
+                                
+                        except json.JSONDecodeError as e:
+                            if self.debug:
+                                print(f"⚠️ Invalid command JSON: {e}")
+                        except Exception as e:
+                            if self.debug:
+                                print(f"⚠️ Command processing error: {e}")
+                            
+            except Exception as e:
+                if self.debug:
+                    print(f"❌ Command listener error: {e}")
+        
+        # Start command listener in daemon thread
+        command_thread = threading.Thread(target=listen_commands, daemon=True)
+        command_thread.start()
+    
+    def start_metrics_publishing(self):
+        """Start background metrics publishing to Redis"""
+        def publish_metrics():
+            while True:
+                try:
+                    if self.redis_client and self.health_status != "SHUTDOWN":
+                        # Publish comprehensive metrics
+                        self.publish_all_metrics()
+                        
+                        # Check for analysis requests
+                        self.check_analysis_requests()
+                        
+                    time.sleep(30)  # Publish every 30 seconds
+                    
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ Metrics publishing error: {e}")
+                    time.sleep(60)  # Wait longer on error
+        
+        # Start metrics publisher in daemon thread
+        metrics_thread = threading.Thread(target=publish_metrics, daemon=True)
+        metrics_thread.start()
+        
+        if self.debug:
+            print("📊 Metrics publishing started (30s intervals)")
+    
+    def publish_all_metrics(self):
+        """Publish all system metrics to Redis"""
+        try:
+            # Core metrics
+            metrics = {
+                'timestamp': datetime.now().isoformat(),
+                'session_id': self.session_id,
+                'account_balance': self.account_balance,
+                'daily_pnl': 0,  # Calculate actual daily P&L
+                'daily_pnl_pct': 0,
+                'positions': self.get_current_positions(),
+                'trading_signals': self.get_current_signals(),
+                'market_open': self.is_market_open(),
+                'performance': {
+                    'sharpe_ratio': self.sharpe_ratio,
+                    'sortino_ratio': self.sortino_ratio,
+                    'max_drawdown': self.max_drawdown,
+                    'var_95': self.var_95,
+                    'risk_adjustment': self.risk_adjustment_factor
+                },
+                'trading': {
+                    'trades_today': self.trade_count,
+                    'positions': len(self.get_current_positions()),
+                    'exposure': self.calculate_current_exposure(),
+                    'trading_enabled': self.trading_enabled
+                },
+                'ml_model': {
+                    'available': ML_AVAILABLE and self.ml_model is not None,
+                    'feature_importance': self.feature_importance
+                },
+                'strategy_performance': self.strategy_performance,
+                'pattern_analysis': self.pattern_analysis
+            }
+            
+            # Publish main metrics
+            self.redis_client.setex("systemx:metrics", 120, json.dumps(metrics))
+            
+            # Publish health data
+            health_data = self.perform_health_check()
+            self.redis_client.setex("systemx:health", 120, json.dumps(health_data))
+            
+            # Publish live data
+            live_data = {
+                'timestamp': datetime.now().isoformat(),
+                'account_equity': self.account_balance,
+                'daily_pnl': 0,
+                'daily_pnl_pct': 0,
+                'positions': self.get_current_positions(),
+                'trading_signals': self.get_current_signals(),
+                'market_open': self.is_market_open()
+            }
+            self.redis_client.setex("systemx:live_data", 120, json.dumps(live_data))
+            
+            # Publish qualified stocks
+            qualified_stocks = self.get_v9b_qualified_stocks()
+            self.redis_client.setex("systemx:qualified_stocks", 300, json.dumps(qualified_stocks))
+            
+            # Publish config
+            config_data = {
+                'max_position_size': self.max_position_size,
+                'max_total_exposure': self.max_total_exposure,
+                'stop_loss_pct': self.stop_loss_pct,
+                'take_profit_pct': self.take_profit_pct,
+                'kelly_enabled': self.kelly_enabled,
+                'trading_enabled': self.trading_enabled,
+                'timestamp': datetime.now().isoformat()
+            }
+            self.redis_client.setex("systemx:config", 300, json.dumps(config_data))
+            
+            # Publish accounts status (3 accounts)
+            accounts_data = self.get_all_accounts_status()
+            self.redis_client.setex("systemx:accounts", 300, json.dumps(accounts_data))
+            
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Metrics publishing error: {e}")
+    
+    def check_analysis_requests(self):
+        """Check for stock analysis requests from API"""
+        try:
+            # Check for analysis requests
+            keys = self.redis_client.keys("systemx:analysis_request:*")
+            for key in keys:
+                try:
+                    request_data = self.redis_client.get(key)
+                    if request_data:
+                        request = json.loads(request_data)
+                        ticker = request.get('ticker')
+                        
+                        if ticker:
+                            # Perform analysis
+                            analysis = self.perform_stock_analysis(ticker)
+                            
+                            # Store response
+                            response_key = f"systemx:analysis_response:{ticker}"
+                            self.redis_client.setex(response_key, 60, json.dumps(analysis))
+                            
+                            # Remove request
+                            self.redis_client.delete(key)
+                            
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ Analysis request processing error: {e}")
+                    # Remove bad request
+                    self.redis_client.delete(key)
+                    
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Analysis request check error: {e}")
+    
+    def perform_stock_analysis(self, ticker: str) -> Dict:
+        """Perform comprehensive stock analysis"""
+        try:
+            # Get V9B analysis
+            v9b_data = self.get_v9b_analysis(ticker)
+            
+            # Get current price
+            current_price = self.get_stock_price(ticker)
+            
+            # Get ML signal if available
+            stock_data = {
+                'ticker': ticker,
+                'dts_score': v9b_data.get('dts_score', 0),
+                'v9b_confidence': v9b_data.get('combined_score', 0),
+                'current_price': current_price
+            }
+            
+            ml_signal = self.get_ml_signal_strength(stock_data)
+            
+            # Determine recommendation
+            dts_score = v9b_data.get('dts_score', 0)
+            v9b_confidence = v9b_data.get('combined_score', 0)
+            
+            if dts_score >= 75 and v9b_confidence >= 8.5 and ml_signal >= 0.7:
+                recommendation = "STRONG BUY"
+                risk_level = "LOW"
+            elif dts_score >= 70 and v9b_confidence >= 8.0 and ml_signal >= 0.6:
+                recommendation = "BUY"
+                risk_level = "MEDIUM"
+            elif dts_score < 60 or v9b_confidence < 6.0:
+                recommendation = "SELL"
+                risk_level = "HIGH"
+            else:
+                recommendation = "HOLD"
+                risk_level = "MEDIUM"
+            
+            return {
+                'ticker': ticker,
+                'dts_score': dts_score,
+                'v9b_confidence': v9b_confidence,
+                'ml_signal': ml_signal,
+                'current_price': current_price,
+                'recommendation': recommendation,
+                'risk_level': risk_level,
+                'rsi': 'N/A',
+                'macd_signal': 'N/A',
+                'volume_status': 'N/A',
+                'claude_analysis': v9b_data.get('claude_analysis', f'Analysis for {ticker}: DTS Score {dts_score}, V9B Confidence {v9b_confidence:.1f}, ML Signal {ml_signal:.2f}. {recommendation} recommendation based on combined signals.'),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Stock analysis error for {ticker}: {e}")
+            return {
+                'ticker': ticker,
+                'dts_score': 'Error',
+                'v9b_confidence': 'Error',
+                'ml_signal': 'Error',
+                'current_price': 'Error',
+                'recommendation': 'HOLD',
+                'risk_level': 'HIGH',
+                'claude_analysis': f'Analysis error for {ticker}: {str(e)}',
+                'timestamp': datetime.now().isoformat()
+            }
+    
+    def apply_config_updates(self, updates: Dict):
+        """Apply configuration updates from Redis commands"""
+        try:
+            if 'stop_loss_pct' in updates:
+                self.stop_loss_pct = float(updates['stop_loss_pct'])
+            if 'take_profit_pct' in updates:
+                self.take_profit_pct = float(updates['take_profit_pct'])
+            if 'trading_enabled' in updates:
+                self.trading_enabled = bool(updates['trading_enabled'])
+            if 'max_position_size' in updates:
+                self.max_position_size = float(updates['max_position_size'])
             
             if self.debug:
-                print(f"🔍 Monitoring endpoint started on http://localhost:8080")
-                print(f"   Dashboard: http://localhost:8080")
-                print(f"   API endpoints: /health, /metrics, /emergency-stop, /config, /qualified-stocks, /live-data")
+                print(f"🔧 Configuration updated: {updates}")
                 
         except Exception as e:
             if self.debug:
-                print(f"⚠️ Monitoring endpoint setup failed: {e}")
+                print(f"⚠️ Config update error: {e}")
+    
+    def get_all_accounts_status(self) -> Dict:
+        """Get comprehensive status of all 3 trading accounts"""
+        try:
+            accounts = []
+            total_balance = 0
+            total_starting_balance = 0
+            total_daily_pnl = 0
+            
+            # Primary account
+            try:
+                account = self.alpaca.get_account()
+                balance = float(account.equity)
+                starting_balance = self.starting_equity.get('PRIMARY_30K', 30000.0)
+                daily_pnl = balance - starting_balance
+                daily_pnl_pct = (daily_pnl / starting_balance) * 100 if starting_balance > 0 else 0
+                
+                accounts.append({
+                    'name': 'PRIMARY_30K',
+                    'balance': balance,
+                    'starting_balance': starting_balance,
+                    'daily_pnl': daily_pnl,
+                    'daily_pnl_pct': daily_pnl_pct,
+                    'status': account.status or 'ACTIVE',
+                    'day_trade_count': getattr(account, 'day_trade_count', 0),
+                    'cash': float(getattr(account, 'cash', 0)),
+                    'buying_power': float(getattr(account, 'buying_power', 0))
+                })
+                total_balance += balance
+                total_starting_balance += starting_balance
+                total_daily_pnl += daily_pnl
+            except Exception as e:
+                starting_balance = self.starting_equity.get('PRIMARY_30K', 30000.0)
+                accounts.append({
+                    'name': 'PRIMARY_30K',
+                    'balance': 0,
+                    'starting_balance': starting_balance,
+                    'daily_pnl': -starting_balance,
+                    'daily_pnl_pct': -100.0,
+                    'status': 'ERROR',
+                    'day_trade_count': 0,
+                    'cash': 0,
+                    'buying_power': 0,
+                    'error': str(e)
+                })
+                total_starting_balance += starting_balance
+                total_daily_pnl -= starting_balance
+            
+            # Additional accounts
+            for i, acc_client in enumerate(self.alpaca_clients):
+                try:
+                    client = acc_client['client']
+                    name = acc_client['name']
+                    account = client.get_account()
+                    balance = float(account.equity)
+                    starting_balance = self.starting_equity.get(name, 30000.0)
+                    daily_pnl = balance - starting_balance
+                    daily_pnl_pct = (daily_pnl / starting_balance) * 100 if starting_balance > 0 else 0
+                    
+                    accounts.append({
+                        'name': name,
+                        'balance': balance,
+                        'starting_balance': starting_balance,
+                        'daily_pnl': daily_pnl,
+                        'daily_pnl_pct': daily_pnl_pct,
+                        'status': account.status or 'ACTIVE',
+                        'day_trade_count': getattr(account, 'day_trade_count', 0),
+                        'cash': float(getattr(account, 'cash', 0)),
+                        'buying_power': float(getattr(account, 'buying_power', 0))
+                    })
+                    total_balance += balance
+                    total_starting_balance += starting_balance
+                    total_daily_pnl += daily_pnl
+                except Exception as e:
+                    name = acc_client.get('name', f'ACCOUNT_{i+2}')
+                    starting_balance = self.starting_equity.get(name, 30000.0)
+                    accounts.append({
+                        'name': name,
+                        'balance': 0,
+                        'starting_balance': starting_balance,
+                        'daily_pnl': -starting_balance,
+                        'daily_pnl_pct': -100.0,
+                        'status': 'ERROR',
+                        'day_trade_count': 0,
+                        'cash': 0,
+                        'buying_power': 0,
+                        'error': str(e)
+                    })
+                    total_starting_balance += starting_balance
+                    total_daily_pnl -= starting_balance
+            
+            return {
+                'accounts': accounts,
+                'total_balance': total_balance,
+                'total_starting_balance': total_starting_balance,
+                'total_daily_pnl': total_daily_pnl,
+                'active_accounts': len([a for a in accounts if a['status'] not in ['ERROR', 'INACTIVE']]),
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Accounts status error: {e}")
+            return {
+                'accounts': [],
+                'total_balance': 0,
+                'total_starting_balance': 90000.0,  # 3 x 30k default
+                'total_daily_pnl': -90000.0,
+                'active_accounts': 0,
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
     
     def calculate_current_exposure(self) -> float:
-        """Calculate current portfolio exposure percentage"""
+        """Calculate current portfolio exposure percentage across all accounts"""
         try:
             positions = self.get_current_positions()
             total_exposure = sum(pos['market_value'] for pos in positions.values())
-            return total_exposure / self.account_balance if self.account_balance > 0 else 0
+            total_equity = self.get_total_account_equity()
+            return total_exposure / total_equity if total_equity > 0 else 0
         except Exception:
             return 0
+    
+    def get_total_account_equity(self) -> float:
+        """Get total equity across all 3 trading accounts"""
+        try:
+            total_equity = 0.0
+            
+            # Primary account equity
+            try:
+                account = self.alpaca.get_account()
+                total_equity += float(account.equity)
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️ Error getting PRIMARY account equity: {e}")
+            
+            # Additional accounts equity
+            for acc_client in self.alpaca_clients:
+                try:
+                    client = acc_client['client']
+                    account = client.get_account()
+                    total_equity += float(account.equity)
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ Error getting {acc_client.get('name', 'unknown')} account equity: {e}")
+            
+            return total_equity
+            
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Error calculating total account equity: {e}")
+            return 90000.0  # Fallback to 3 x 30k
     
     def check_emergency_conditions(self) -> bool:
         """Check for emergency stop conditions"""
@@ -3134,8 +3613,9 @@ class SystemX:
             sys.exit(1)
     
     def handle_trading_error(self, error_type: str, error: Exception):
-        """Handle trading-specific errors"""
+        """Handle trading-specific errors with exponential backoff"""
         self.error_count += 1
+        self.consecutive_errors += 1
         error_msg = f"{error_type}: {str(error)}"
         
         print(f"❌ TRADING ERROR: {error_msg}")
@@ -3143,10 +3623,25 @@ class SystemX:
         # Log error
         self.log_system_event(error_type, error_msg, "ERROR")
         
+        # Implement exponential backoff after consecutive errors
+        if self.consecutive_errors >= 3:
+            backoff_time = min(300, self.error_backoff_time * (2 ** (self.consecutive_errors - 3)))
+            print(f"⏳ Error backoff: waiting {backoff_time}s after {self.consecutive_errors} consecutive errors")
+            time.sleep(backoff_time)
+            self.error_backoff_time = min(300, self.error_backoff_time * 1.5)  # Increase backoff time
+        
         # Continue operation for trading errors (less critical)
         if self.error_count >= self.max_consecutive_errors // 2:
             self.send_slack_notification("⚠️ System X Trading Issues", 
                 f"Multiple trading errors: {self.error_count}\nLatest: {error_msg}")
+    
+    def reset_error_counters(self):
+        """Reset error counters on successful operations"""
+        if self.consecutive_errors > 0:
+            self.consecutive_errors = 0
+            self.error_backoff_time = 30  # Reset to initial backoff time
+            if self.debug:
+                print("✅ Error counters reset - system recovering")
     
     def handle_backtesting_error(self, error_type: str, error: Exception):
         """Handle backtesting-specific errors"""
@@ -3256,6 +3751,17 @@ class SystemX:
                               f"Errors: {self.error_count} | Trades: {self.trade_count} | "
                               f"Backtests: {self.backtest_count}")
                 
+                # Clear LRU cache every hour to prevent memory leaks
+                if (current_time - self.last_cache_clear).total_seconds() >= 3600:  # 1 hour
+                    try:
+                        self.get_cached_v9b_analysis.cache_clear()
+                        self.last_cache_clear = current_time
+                        if self.debug:
+                            print("🧹 LRU cache cleared - preventing memory leaks")
+                    except Exception as e:
+                        if self.debug:
+                            print(f"⚠️ Cache clear error: {e}")
+                
                 # Check if we should shut down due to errors
                 if self.health_status == "SHUTDOWN":
                     break
@@ -3267,6 +3773,7 @@ class SystemX:
                         try:
                             self.execute_trading_cycle()
                             last_trading_cycle = current_time
+                            self.reset_error_counters()  # Reset on successful operation
                         except Exception as e:
                             self.handle_trading_error("TRADING_CYCLE_FAILED", e)
                 
