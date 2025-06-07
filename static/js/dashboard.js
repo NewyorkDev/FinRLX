@@ -5,6 +5,12 @@ class TradingDashboard {
         this.updateInterval = 5000; // 5 seconds
         this.isConnected = true;
         this.activityLog = [];
+        this.chartInitialized = false;
+        this.updateIntervalId = null;
+        this.isUpdating = false;
+        this.portfolioUpdatePending = false; // Prevent portfolio chart spam
+        this.strategyUpdatePending = false; // Prevent strategy chart spam
+        this.lastStrategyUpdate = null; // Track last strategy chart update
         
         this.init();
     }
@@ -26,24 +32,28 @@ class TradingDashboard {
     }
 
     initCharts() {
+        if (this.chartInitialized) return;
+        
         // Portfolio Performance Chart
-        const portfolioCtx = document.getElementById('portfolio-chart').getContext('2d');
-        this.charts.portfolio = new Chart(portfolioCtx, {
+        const portfolioCtx = document.getElementById('portfolio-chart');
+        if (!portfolioCtx) return;
+        
+        this.charts.portfolio = new Chart(portfolioCtx.getContext('2d'), {
             type: 'line',
             data: {
                 labels: [],
                 datasets: [{
                     label: 'Portfolio Value',
                     data: [],
-                    borderColor: '#3b82f6',
-                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderColor: '#2b8dc8',
+                    backgroundColor: 'rgba(43, 141, 200, 0.1)',
                     borderWidth: 2,
                     fill: true,
                     tension: 0.4
                 }, {
                     label: 'Benchmark',
                     data: [],
-                    borderColor: '#6b7280',
+                    borderColor: '#71a2dc',
                     backgroundColor: 'transparent',
                     borderWidth: 1,
                     borderDash: [5, 5],
@@ -53,10 +63,13 @@ class TradingDashboard {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                animation: {
+                    duration: 0 // Disable animations to prevent scrolling issues
+                },
                 plugins: {
                     legend: {
                         labels: {
-                            color: '#9ca3af'
+                            color: '#b0b8c7'
                         }
                     }
                 },
@@ -70,18 +83,18 @@ class TradingDashboard {
                             }
                         },
                         grid: {
-                            color: '#374151'
+                            color: '#1e4784'
                         },
                         ticks: {
-                            color: '#9ca3af'
+                            color: '#b0b8c7'
                         }
                     },
                     y: {
                         grid: {
-                            color: '#374151'
+                            color: '#1e4784'
                         },
                         ticks: {
-                            color: '#9ca3af',
+                            color: '#b0b8c7',
                             callback: function(value) {
                                 return '$' + value.toLocaleString();
                             }
@@ -101,18 +114,20 @@ class TradingDashboard {
             }
         });
 
-        // Strategy Performance Chart
-        const strategyCtx = document.getElementById('strategy-chart').getContext('2d');
-        this.charts.strategy = new Chart(strategyCtx, {
+        // Strategy Performance Chart - Initialize with static data to prevent updates
+        const strategyCtx = document.getElementById('strategy-chart');
+        if (!strategyCtx) return;
+        
+        this.charts.strategy = new Chart(strategyCtx.getContext('2d'), {
             type: 'doughnut',
             data: {
                 labels: ['V9B Pure', 'Technical Only', 'ML Enhanced'],
                 datasets: [{
-                    data: [0, 0, 0],
+                    data: [1, 1, 1], // Start with equal data to prevent initial animations
                     backgroundColor: [
-                        '#10b981',
-                        '#f59e0b',
-                        '#8b5cf6'
+                        '#2b8dc8',
+                        '#3b9cdc',
+                        '#71a2dc'
                     ],
                     borderWidth: 0,
                     hoverOffset: 4
@@ -121,17 +136,22 @@ class TradingDashboard {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                animation: {
+                    duration: 0 // Disable animations to prevent scrolling issues
+                },
                 plugins: {
                     legend: {
                         position: 'bottom',
                         labels: {
-                            color: '#9ca3af',
+                            color: '#b0b8c7',
                             padding: 20
                         }
                     }
                 }
             }
         });
+        
+        this.chartInitialized = true;
     }
 
     setupEventListeners() {
@@ -169,7 +189,11 @@ class TradingDashboard {
     }
 
     async updateDashboard() {
+        if (this.isUpdating) return; // Prevent multiple simultaneous updates
+        
         try {
+            this.isUpdating = true;
+            
             // Fetch all data in parallel
             const [healthData, metricsData, configData] = await Promise.all([
                 this.fetchData('/health'),
@@ -192,6 +216,8 @@ class TradingDashboard {
             console.error('Dashboard update error:', error);
             this.isConnected = false;
             this.updateConnectionStatus('CONNECTION ERROR', false);
+        } finally {
+            this.isUpdating = false;
         }
     }
 
@@ -290,36 +316,82 @@ class TradingDashboard {
     }
 
     updateCharts(data) {
-        // Update portfolio chart with sample data
-        if (this.charts.portfolio) {
-            const now = new Date();
+        // Update portfolio chart with sample data - prevent infinite scrolling
+        if (this.charts.portfolio && this.chartInitialized) {
             const portfolioValue = data.account_balance || 30000;
             
-            // Only add new data point if enough time has passed (prevent spam)
-            const lastLabel = this.charts.portfolio.data.labels[this.charts.portfolio.data.labels.length - 1];
-            if (!lastLabel || (now - lastLabel) > 60000) { // At least 1 minute between points
-                this.charts.portfolio.data.labels.push(now);
-                this.charts.portfolio.data.datasets[0].data.push(portfolioValue);
-                
-                // Keep last 50 points
-                if (this.charts.portfolio.data.labels.length > 50) {
-                    this.charts.portfolio.data.labels.shift();
-                    this.charts.portfolio.data.datasets[0].data.shift();
+            // Only update chart data on first load or when value actually changes
+            const currentDataset = this.charts.portfolio.data.datasets[0];
+            const lastValue = currentDataset.data[currentDataset.data.length - 1];
+            
+            // Only add new data if portfolio value changed by more than $10 or chart is empty
+            if (currentDataset.data.length === 0 || Math.abs(portfolioValue - lastValue) > 10) {
+                // Prevent duplicate chart updates
+                if (!this.portfolioUpdatePending) {
+                    this.portfolioUpdatePending = true;
+                    
+                    try {
+                        const now = new Date();
+                        this.charts.portfolio.data.labels.push(now.toLocaleTimeString());
+                        this.charts.portfolio.data.datasets[0].data.push(portfolioValue);
+                        
+                        // Add benchmark data (slightly lower)
+                        this.charts.portfolio.data.datasets[1].data.push(portfolioValue * 0.98);
+                        
+                        // Keep last 20 points only (reasonable chart length)
+                        if (this.charts.portfolio.data.labels.length > 20) {
+                            this.charts.portfolio.data.labels.shift();
+                            this.charts.portfolio.data.datasets[0].data.shift();
+                            this.charts.portfolio.data.datasets[1].data.shift();
+                        }
+                        
+                        // Use silent update to prevent reflow issues
+                        this.charts.portfolio.update('none');
+                    } catch (error) {
+                        console.error('Portfolio chart update error:', error);
+                    } finally {
+                        // Reset flag after a short delay
+                        setTimeout(() => {
+                            this.portfolioUpdatePending = false;
+                        }, 2000);
+                    }
                 }
-                
-                this.charts.portfolio.update('none');
             }
         }
 
-        // Update strategy chart
-        if (this.charts.strategy) {
-            const strategyData = data.strategy_performance || {};
-            const v9bTrades = strategyData.V9B_PURE?.trades || 0;
-            const techTrades = strategyData.TECHNICAL_ONLY?.trades || 0;
-            const mlTrades = strategyData.ML_ENHANCED?.trades || 0;
-            
-            this.charts.strategy.data.datasets[0].data = [v9bTrades, techTrades, mlTrades];
-            this.charts.strategy.update('none');
+        // Update strategy chart - prevent infinite updates
+        if (this.charts.strategy && this.chartInitialized) {
+            // Only update strategy chart every 30 minutes to prevent scrolling issues
+            const now = Date.now();
+            if (!this.lastStrategyUpdate || (now - this.lastStrategyUpdate) > 1800000) { // 30 minutes
+                
+                if (!this.strategyUpdatePending) {
+                    this.strategyUpdatePending = true;
+                    
+                    try {
+                        const strategyData = data.strategy_performance || {};
+                        const v9bTrades = strategyData.V9B_PURE?.trades || 1;
+                        const techTrades = strategyData.TECHNICAL_ONLY?.trades || 1;
+                        const mlTrades = strategyData.ML_ENHANCED?.trades || 1;
+                        
+                        // Only update if data has actually changed
+                        const currentData = this.charts.strategy.data.datasets[0].data;
+                        const newData = [v9bTrades, techTrades, mlTrades];
+                        
+                        if (JSON.stringify(currentData) !== JSON.stringify(newData)) {
+                            this.charts.strategy.data.datasets[0].data = newData;
+                            this.charts.strategy.update('none');
+                            this.lastStrategyUpdate = now;
+                        }
+                    } catch (error) {
+                        console.error('Strategy chart update error:', error);
+                    } finally {
+                        setTimeout(() => {
+                            this.strategyUpdatePending = false;
+                        }, 2000);
+                    }
+                }
+            }
         }
     }
 
@@ -471,7 +543,7 @@ const additionalStyles = `
     }
     
     .action-btn:hover {
-        background: #2563eb;
+        background: var(--accent-blue-light);
         transform: translateY(-1px);
     }
     

@@ -96,8 +96,24 @@ start_system() {
 stop_system() {
     print_info "Stopping System X..."
     
+    # Stop PM2 processes
     pm2 stop system-x system-x-monitor 2>/dev/null || true
     pm2 delete system-x system-x-monitor 2>/dev/null || true
+    
+    # Kill any rogue system_x Python processes
+    print_info "Cleaning up rogue processes..."
+    pkill -f "system_x.py" 2>/dev/null || true
+    pkill -f "python.*system_x" 2>/dev/null || true
+    
+    # Force kill processes using port 8080
+    local port_pids=$(lsof -ti :8080 2>/dev/null || true)
+    if [ ! -z "$port_pids" ]; then
+        print_info "Killing processes using port 8080..."
+        echo "$port_pids" | xargs kill -9 2>/dev/null || true
+    fi
+    
+    # Wait a moment for cleanup
+    sleep 2
     
     print_status "System X stopped"
 }

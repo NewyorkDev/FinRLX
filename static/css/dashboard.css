@@ -1,23 +1,27 @@
 /* System X Advanced Trading Dashboard CSS */
 :root {
-    --primary-bg: #0a0e1a;
-    --secondary-bg: #1a1f2e;
-    --card-bg: #252a3d;
-    --border-color: #374151;
+    --primary-bg: #03264f;
+    --secondary-bg: #062e5d;
+    --card-bg: #094180;
+    --border-color: #1e4784;
     --text-primary: #ffffff;
-    --text-secondary: #9ca3af;
-    --accent-blue: #3b82f6;
+    --text-secondary: #b0b8c7;
+    --accent-blue: #2b8dc8;
+    --accent-blue-light: #3b9cdc;
+    --accent-blue-dark: #022e5d;
+    --accent-blue-medium: #1c4793;
     --accent-green: #10b981;
     --accent-red: #ef4444;
     --accent-yellow: #f59e0b;
-    --accent-purple: #8b5cf6;
-    --gradient-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    --gradient-success: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-    --gradient-danger: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+    --accent-grey: #71a2dc;
+    --dark-black: #000000;
+    --gradient-primary: linear-gradient(135deg, #2b8dc8 0%, #1c4793 100%);
+    --gradient-success: linear-gradient(135deg, #2b8dc8 0%, #3b9cdc 100%);
+    --gradient-danger: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
 }
 
 * {
@@ -186,6 +190,7 @@ body {
     align-items: center;
     justify-content: center;
     font-size: 1.25rem;
+    color: white;
 }
 
 .metric-content h3 {
@@ -235,6 +240,11 @@ body {
     border-radius: 1rem;
     padding: 1.5rem;
     box-shadow: var(--shadow-md);
+    overflow: hidden; /* Prevent any potential scrolling issues */
+    position: relative; /* Ensure proper positioning */
+    height: 400px; /* Fixed height to prevent excessive expansion */
+    max-height: 500px; /* Maximum height constraint */
+    min-height: 300px; /* Minimum height for readability */
 }
 
 .chart-header {
@@ -270,6 +280,14 @@ body {
     background: var(--accent-blue);
     color: white;
     border-color: var(--accent-blue);
+}
+
+/* Chart Canvas Constraints */
+.chart-container canvas {
+    max-width: 100% !important;
+    max-height: 320px !important; /* Account for header space */
+    height: auto !important;
+    width: auto !important;
 }
 
 /* Tables Row */
@@ -512,6 +530,17 @@ table tbody tr:hover {
     .header-right {
         gap: 1rem;
     }
+    
+    /* Adjust chart container height for tablets */
+    .chart-container {
+        height: 350px;
+        max-height: 400px;
+        min-height: 280px;
+    }
+    
+    .chart-container canvas {
+        max-height: 270px !important;
+    }
 }
 
 @media (max-width: 768px) {
@@ -535,6 +564,17 @@ table tbody tr:hover {
     
     .risk-grid {
         grid-template-columns: 1fr;
+    }
+    
+    /* Adjust chart container height for mobile */
+    .chart-container {
+        height: 300px;
+        max-height: 350px;
+        min-height: 250px;
+    }
+    
+    .chart-container canvas {
+        max-height: 220px !important;
     }
 }
 

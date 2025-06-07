@@ -47,6 +47,27 @@ try:
 except ImportError:
     ML_AVAILABLE = False
 
+# Retry logic for robust API calls
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential
+    RETRY_AVAILABLE = True
+except ImportError:
+    RETRY_AVAILABLE = False
+    # Fallback decorator for systems without tenacity
+    def retry(stop=None, wait=None):
+        def decorator(func):
+            def wrapper(*args, **kwargs):
+                for attempt in range(3):  # Simple 3-attempt fallback
+                    try:
+                        return func(*args, **kwargs)
+                    except Exception as e:
+                        if attempt == 2:  # Last attempt
+                            raise e
+                        time.sleep(2 ** attempt)  # Simple exponential backoff
+                return wrapper
+            return wrapper
+        return decorator
+
 # Add FinRL to path
 sys.path.insert(0, '/Users/francisclase/FinRLX')
 
@@ -285,6 +306,9 @@ class SystemX:
             self.setup_connection_pool()
             self.initialize_supabase_tables()
             self.create_monitoring_endpoint()
+            
+            # Load previous performance metrics for continuity
+            self.load_performance_metrics()
             
             # Display feature availability status
             feature_status = []
@@ -1006,6 +1030,19 @@ class SystemX:
         except Exception:
             return None
     
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    def get_stock_price_with_retry(self, ticker: str) -> Optional[float]:
+        """Get stock price with exponential backoff retry"""
+        try:
+            trade = self.alpaca.get_latest_trade(ticker)
+            if self.debug:
+                print(f"📈 Price fetch success for {ticker}: ${float(trade.price):.2f}")
+            return float(trade.price)
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Price fetch attempt failed for {ticker}: {e}")
+            raise
+    
     def calculate_position_size(self, ticker: str, price: float, confidence_multiplier: float = 1.0) -> int:
         """Calculate position size using Kelly Criterion with fallback to basic sizing"""
         if not price:
@@ -1368,16 +1405,23 @@ class SystemX:
             return {ticker: self.get_stock_price(ticker) for ticker in tickers}
     
     def fetch_multiple_prices_sync(self, tickers: List[str]) -> Dict[str, float]:
-        """Synchronous fallback for fetching multiple prices"""
+        """Synchronous fallback for fetching multiple prices with retry logic"""
         prices = {}
         for ticker in tickers:
             try:
-                price = self.get_stock_price(ticker)
+                # Use retry logic for more reliable price fetching
+                price = self.get_stock_price_with_retry(ticker)
                 if price:
                     prices[ticker] = price
             except Exception as e:
-                if self.debug:
-                    print(f"⚠️ Price fetch error for {ticker}: {e}")
+                # Fallback to basic method if retry fails
+                try:
+                    price = self.get_stock_price(ticker)
+                    if price:
+                        prices[ticker] = price
+                except Exception:
+                    if self.debug:
+                        print(f"⚠️ Price fetch failed completely for {ticker}: {e}")
         return prices
     
     @lru_cache(maxsize=100)
@@ -1577,6 +1621,10 @@ class SystemX:
             # Calculate metrics if we have enough data
             if len(self.daily_returns) >= 30:  # At least 30 days
                 self.calculate_risk_metrics()
+            
+            # Save metrics periodically (every 10 updates)
+            if len(self.portfolio_values) % 10 == 0:
+                self.save_performance_metrics()
                 
         except Exception as e:
             self.log_system_event("PERFORMANCE_UPDATE_ERROR", f"Error updating performance: {e}")
@@ -1623,6 +1671,81 @@ class SystemX:
                 
         except Exception as e:
             self.log_system_event("RISK_METRICS_ERROR", f"Error calculating risk metrics: {e}")
+    
+    def save_performance_metrics(self):
+        """Save performance metrics to file for persistence across restarts"""
+        try:
+            metrics = {
+                'daily_returns': self.daily_returns[-252:],  # Last year
+                'portfolio_values': self.portfolio_values[-252:],
+                'trade_journal': self.trade_journal[-1000:],  # Last 1000 trades
+                'strategy_performance': self.strategy_performance,
+                'pattern_analysis': self.pattern_analysis,
+                'risk_metrics': {
+                    'sharpe_ratio': self.sharpe_ratio,
+                    'sortino_ratio': self.sortino_ratio,
+                    'var_95': self.var_95,
+                    'max_drawdown': self.max_drawdown,
+                    'risk_adjustment_factor': self.risk_adjustment_factor
+                },
+                'feature_importance': self.feature_importance,
+                'last_save': datetime.now().isoformat(),
+                'session_id': self.session_id
+            }
+            
+            with open('system_x_metrics.json', 'w') as f:
+                json.dump(metrics, f, default=str, indent=2)
+                
+            if self.debug:
+                print(f"💾 Performance metrics saved ({len(self.daily_returns)} returns, {len(self.trade_journal)} trades)")
+                
+        except Exception as e:
+            print(f"⚠️ Could not save metrics: {e}")
+
+    def load_performance_metrics(self):
+        """Load saved performance metrics"""
+        try:
+            if os.path.exists('system_x_metrics.json'):
+                with open('system_x_metrics.json', 'r') as f:
+                    metrics = json.load(f)
+                
+                # Restore metrics with validation
+                self.daily_returns = metrics.get('daily_returns', [])
+                self.portfolio_values = metrics.get('portfolio_values', [])
+                self.trade_journal = metrics.get('trade_journal', [])
+                self.strategy_performance.update(metrics.get('strategy_performance', {}))
+                self.pattern_analysis = metrics.get('pattern_analysis', {})
+                
+                # Restore risk metrics
+                risk_metrics = metrics.get('risk_metrics', {})
+                self.sharpe_ratio = risk_metrics.get('sharpe_ratio', 0.0)
+                self.sortino_ratio = risk_metrics.get('sortino_ratio', 0.0)
+                self.var_95 = risk_metrics.get('var_95', 0.0)
+                self.max_drawdown = risk_metrics.get('max_drawdown', 0.0)
+                self.risk_adjustment_factor = risk_metrics.get('risk_adjustment_factor', 1.0)
+                
+                # Restore ML feature importance if available
+                self.feature_importance = metrics.get('feature_importance', {})
+                
+                # Convert trade journal timestamps back to datetime objects
+                for trade in self.trade_journal:
+                    if 'timestamp' in trade and isinstance(trade['timestamp'], str):
+                        try:
+                            trade['timestamp'] = datetime.fromisoformat(trade['timestamp'])
+                        except:
+                            trade['timestamp'] = datetime.now()
+                
+                last_save = metrics.get('last_save', 'unknown')
+                print(f"✅ Loaded saved performance metrics (last save: {last_save})")
+                print(f"   📊 {len(self.daily_returns)} daily returns, {len(self.trade_journal)} trades")
+                print(f"   📈 Sharpe: {self.sharpe_ratio:.2f}, Max DD: {self.max_drawdown:.2f}%")
+                
+        except Exception as e:
+            print(f"⚠️ Could not load metrics: {e}")
+            # Initialize empty metrics if loading fails
+            self.daily_returns = []
+            self.portfolio_values = []
+            self.trade_journal = []
     
     def update_strategy_performance(self, strategy_type: str, trade_result: float):
         """Update strategy performance metrics"""
@@ -1823,7 +1946,18 @@ class SystemX:
             @app.route('/')
             def dashboard():
                 from flask import render_template
-                return render_template('dashboard.html')
+                try:
+                    return render_template('dashboard.html')
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ Main dashboard failed, using simple fallback: {e}")
+                    return render_template('simple_dashboard.html')
+            
+            # Simple dashboard fallback route
+            @app.route('/simple')
+            def simple_dashboard():
+                from flask import render_template
+                return render_template('simple_dashboard.html')
             
             # Qualified stocks endpoint
             @app.route('/qualified-stocks')
@@ -1912,12 +2046,69 @@ class SystemX:
                     except Exception as e:
                         return jsonify({'error': str(e)}), 400
             
-            # Run in separate thread
+            # Run in separate thread with retry logic
             def run_app():
-                app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+                port = 8080
+                max_retries = 5
+                retry_delay = 2
+                
+                for attempt in range(max_retries):
+                    try:
+                        if self.debug:
+                            print(f"🔍 Starting Flask server on port {port} (attempt {attempt + 1}/{max_retries})")
+                        
+                        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
+                        break  # Success
+                        
+                    except OSError as e:
+                        if "Address already in use" in str(e):
+                            if attempt < max_retries - 1:
+                                if self.debug:
+                                    print(f"⚠️ Port {port} in use, retrying in {retry_delay}s...")
+                                time.sleep(retry_delay)
+                                retry_delay *= 1.5  # Exponential backoff
+                                
+                                # Try to kill processes using the port
+                                try:
+                                    import subprocess
+                                    subprocess.run(['lsof', '-ti', f':{port}'], capture_output=True, check=False)
+                                    result = subprocess.run(['lsof', '-ti', f':{port}'], capture_output=True, text=True)
+                                    if result.stdout.strip():
+                                        pids = result.stdout.strip().split('\n')
+                                        for pid in pids:
+                                            try:
+                                                subprocess.run(['kill', '-9', pid], check=False)
+                                                if self.debug:
+                                                    print(f"🔧 Killed process {pid} using port {port}")
+                                            except:
+                                                pass
+                                except:
+                                    pass
+                            else:
+                                print(f"❌ Failed to start Flask server after {max_retries} attempts: {e}")
+                                return
+                        else:
+                            print(f"❌ Flask server error: {e}")
+                            return
+                    except Exception as e:
+                        print(f"❌ Unexpected Flask server error: {e}")
+                        return
             
             monitoring_thread = threading.Thread(target=run_app, daemon=True)
             monitoring_thread.start()
+            
+            # Wait a moment to see if server started successfully
+            time.sleep(3)
+            
+            # Test if server is responding
+            try:
+                import urllib.request
+                urllib.request.urlopen('http://localhost:8080/health', timeout=5)
+                if self.debug:
+                    print("✅ Flask server is responding to health checks")
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️ Flask server may not be responding: {e}")
             
             if self.debug:
                 print(f"🔍 Monitoring endpoint started on http://localhost:8080")
@@ -1996,8 +2187,16 @@ class SystemX:
             
             self.log_system_event("EMERGENCY_STOP", f"{reason}: {details}")
             
+            # Save final performance metrics before stopping
+            self.save_performance_metrics()
+            
         except Exception as e:
             print(f"⚠️ Emergency stop error: {e}")
+            # Still try to save metrics even if emergency stop has errors
+            try:
+                self.save_performance_metrics()
+            except:
+                pass
     
     def close_all_positions(self, reason: str = "EMERGENCY"):
         """Close all open positions immediately"""
