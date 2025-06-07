@@ -70,7 +70,17 @@ TIME_ZONE_SELFDEFINED = "xxx"  # If neither of the above is your time zone, you 
 USE_TIME_ZONE_SELFDEFINED = 0  # 0 (default) or 1 (use the self defined)
 
 # parameters for data sources
-ALPACA_API_KEY = "xxx"  # your ALPACA_API_KEY
-ALPACA_API_SECRET = "xxx"  # your ALPACA_API_SECRET
-ALPACA_API_BASE_URL = "https://paper-api.alpaca.markets"  # alpaca url
+import os
+
+# Import dotenv with fallback
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # No-op if dotenv not available, will still work with environment variables
+    pass
+
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "xxx")
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "xxx")
+ALPACA_API_BASE_URL = os.getenv("ALPACA_API_BASE_URL", "https://paper-api.alpaca.markets")
 BINANCE_BASE_URL = "https://data.binance.vision/"  # binance url

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System X - Advanced Trading Dashboard</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-left">
+                <h1><i class="fas fa-chart-line"></i> System X Trading Dashboard</h1>
+                <div class="status-indicator">
+                    <span id="connection-status" class="status-dot online"></span>
+                    <span id="connection-text">OPERATIONAL</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="account-info">
+                    <span id="account-balance">$30,000.00</span>
+                    <small>Available Balance</small>
+                </div>
+                <div class="market-status">
+                    <span id="market-status">CLOSED</span>
+                    <small>Market Status</small>
+                </div>
+                <button id="emergency-stop" class="emergency-btn">
+                    <i class="fas fa-stop"></i> EMERGENCY STOP
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Dashboard Grid -->
+        <main class="dashboard-main">
+            <!-- Key Metrics Row -->
+            <section class="metrics-row">
+                <div class="metric-card">
+                    <div class="metric-icon"><i class="fas fa-chart-line"></i></div>
+                    <div class="metric-content">
+                        <h3 id="daily-pnl">$0.00</h3>
+                        <p>Daily P&L</p>
+                        <span id="daily-pnl-pct" class="metric-change">0.00%</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-icon"><i class="fas fa-briefcase"></i></div>
+                    <div class="metric-content">
+                        <h3 id="positions-count">0</h3>
+                        <p>Open Positions</p>
+                        <span id="exposure-pct" class="metric-change">0%</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-icon"><i class="fas fa-exchange-alt"></i></div>
+                    <div class="metric-content">
+                        <h3 id="trades-today">0</h3>
+                        <p>Trades Today</p>
+                        <span id="win-rate" class="metric-change">0%</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-icon"><i class="fas fa-brain"></i></div>
+                    <div class="metric-content">
+                        <h3 id="ml-confidence">0%</h3>
+                        <p>ML Confidence</p>
+                        <span id="model-status" class="metric-change">Ready</span>
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-icon"><i class="fas fa-tachometer-alt"></i></div>
+                    <div class="metric-content">
+                        <h3 id="sharpe-ratio">0.00</h3>
+                        <p>Sharpe Ratio</p>
+                        <span id="sortino-ratio" class="metric-change">0.00</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Charts Row -->
+            <section class="charts-row">
+                <!-- Portfolio Performance Chart -->
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3><i class="fas fa-chart-area"></i> Portfolio Performance</h3>
+                        <div class="chart-controls">
+                            <button class="time-btn active" data-period="1D">1D</button>
+                            <button class="time-btn" data-period="1W">1W</button>
+                            <button class="time-btn" data-period="1M">1M</button>
+                            <button class="time-btn" data-period="3M">3M</button>
+                        </div>
+                    </div>
+                    <canvas id="portfolio-chart"></canvas>
+                </div>
+
+                <!-- Strategy Performance -->
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3><i class="fas fa-cogs"></i> Strategy Performance</h3>
+                    </div>
+                    <canvas id="strategy-chart"></canvas>
+                </div>
+            </section>
+
+            <!-- Data Tables Row -->
+            <section class="tables-row">
+                <!-- Current Positions -->
+                <div class="table-container">
+                    <div class="table-header">
+                        <h3><i class="fas fa-list"></i> Current Positions</h3>
+                        <span id="positions-total">Total: $0</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table id="positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>Qty</th>
+                                    <th>Entry Price</th>
+                                    <th>Current Price</th>
+                                    <th>P&L</th>
+                                    <th>%</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positions-tbody">
+                                <tr>
+                                    <td colspan="6" class="no-data">No open positions</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Qualified Stocks -->
+                <div class="table-container">
+                    <div class="table-header">
+                        <h3><i class="fas fa-star"></i> V9B Qualified Stocks</h3>
+                        <span id="qualified-count">0 stocks</span>
+                    </div>
+                    <div class="table-wrapper">
+                        <table id="qualified-table">
+                            <thead>
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>DTS Score</th>
+                                    <th>V9B Score</th>
+                                    <th>ML Signal</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="qualified-tbody">
+                                <tr>
+                                    <td colspan="5" class="no-data">Loading qualified stocks...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- System Status Row -->
+            <section class="status-row">
+                <!-- System Health -->
+                <div class="status-panel">
+                    <h3><i class="fas fa-heartbeat"></i> System Health</h3>
+                    <div class="health-grid">
+                        <div class="health-item">
+                            <span class="health-label">Supabase</span>
+                            <span id="supabase-status" class="health-status online">Online</span>
+                        </div>
+                        <div class="health-item">
+                            <span class="health-label">Alpaca</span>
+                            <span id="alpaca-status" class="health-status online">Online</span>
+                        </div>
+                        <div class="health-item">
+                            <span class="health-label">Polygon</span>
+                            <span id="polygon-status" class="health-status online">Online</span>
+                        </div>
+                        <div class="health-item">
+                            <span class="health-label">ML Model</span>
+                            <span id="ml-status" class="health-status online">Ready</span>
+                        </div>
+                        <div class="health-item">
+                            <span class="health-label">Trading</span>
+                            <span id="trading-status" class="health-status online">Enabled</span>
+                        </div>
+                        <div class="health-item">
+                            <span class="health-label">Uptime</span>
+                            <span id="uptime" class="health-status">0m</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Risk Metrics -->
+                <div class="status-panel">
+                    <h3><i class="fas fa-shield-alt"></i> Risk Metrics</h3>
+                    <div class="risk-grid">
+                        <div class="risk-meter">
+                            <div class="risk-label">VaR (95%)</div>
+                            <div class="risk-value" id="var-95">$0</div>
+                        </div>
+                        <div class="risk-meter">
+                            <div class="risk-label">Max Drawdown</div>
+                            <div class="risk-value" id="max-drawdown">0%</div>
+                        </div>
+                        <div class="risk-meter">
+                            <div class="risk-label">Kelly Position</div>
+                            <div class="risk-value" id="kelly-position">0%</div>
+                        </div>
+                        <div class="risk-meter">
+                            <div class="risk-label">Stop Loss</div>
+                            <div class="risk-value" id="stop-loss">5%</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Activity Feed -->
+                <div class="status-panel activity-feed">
+                    <h3><i class="fas fa-rss"></i> Live Activity</h3>
+                    <div id="activity-log" class="activity-list">
+                        <div class="activity-item">
+                            <span class="activity-time">13:15:20</span>
+                            <span class="activity-text">System X initialized successfully</span>
+                        </div>
+                        <div class="activity-item">
+                            <span class="activity-time">13:15:25</span>
+                            <span class="activity-text">Connected to all data sources</span>
+                        </div>
+                        <div class="activity-item">
+                            <span class="activity-time">13:15:30</span>
+                            <span class="activity-text">Market status: CLOSED</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="loading-spinner">
+            <i class="fas fa-cog fa-spin"></i>
+            <p>Loading System X Dashboard...</p>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

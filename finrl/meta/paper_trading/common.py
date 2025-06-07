@@ -7,6 +7,8 @@ import os
 import time
 
 import gym
+import numpy as np
+import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.distributions.normal import Normal

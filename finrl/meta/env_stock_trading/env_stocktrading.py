@@ -2,13 +2,55 @@ from __future__ import annotations
 
 from typing import List
 
-import gymnasium as gym
+# Import gymnasium/gym with fallback
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+    GYM_AVAILABLE = True
+except ImportError:
+    try:
+        import gym
+        from gym import spaces
+        GYM_AVAILABLE = True
+    except ImportError:
+        print("⚠️ Neither gymnasium nor gym available - using minimal fallback")
+        GYM_AVAILABLE = False
+        # Create minimal mock
+        class MockGym:
+            class Env:
+                def __init__(self):
+                    self.observation_space = None
+                    self.action_space = None
+                def reset(self): return []
+                def step(self, action): return [], 0, False, {}
+                def render(self): pass
+            class spaces:
+                class Box:
+                    def __init__(self, *args, **kwargs): pass
+                class Discrete:
+                    def __init__(self, *args, **kwargs): pass
+        gym = MockGym()
+        spaces = gym.spaces
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from gymnasium import spaces
-from gymnasium.utils import seeding
+# Import seeding with fallback
+try:
+    from gymnasium.utils import seeding
+except ImportError:
+    try:
+        from gym.utils import seeding
+    except ImportError:
+        # Fallback seeding function
+        def seeding(seed=None):
+            import random
+            import numpy as np
+            if seed is not None:
+                random.seed(seed)
+                np.random.seed(seed)
+            return [seed]
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 matplotlib.use("Agg")
