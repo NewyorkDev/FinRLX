@@ -22,7 +22,8 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Union, Callable
+from pydantic import BaseModel, Field, validator, ConfigDict
 import warnings
 import asyncio
 import aiohttp
@@ -142,16 +143,199 @@ except ImportError:
         GYM_AVAILABLE = False
         GYM_TYPE = None
 
+# Pydantic Configuration Models for Type-Safe Config Validation
+class TradingConfig(BaseModel):
+    """Trading configuration with validation"""
+    model_config = ConfigDict(extra='forbid')
+    
+    max_position_size: float = Field(
+        default=0.15, 
+        ge=0.01, 
+        le=1.0, 
+        description="Maximum position size as fraction of portfolio (1-100%)"
+    )
+    max_total_exposure: float = Field(
+        default=0.75, 
+        ge=0.1, 
+        le=1.0, 
+        description="Maximum total exposure as fraction of portfolio (10-100%)"
+    )
+    stop_loss_pct: float = Field(
+        default=0.05, 
+        ge=0.01, 
+        le=0.5, 
+        description="Stop loss percentage (1-50%)"
+    )
+    take_profit_pct: float = Field(
+        default=0.10, 
+        ge=0.02, 
+        le=1.0, 
+        description="Take profit percentage (2-100%)"
+    )
+    max_day_trades: int = Field(
+        default=3, 
+        ge=0, 
+        le=10, 
+        description="Maximum day trades per account (0-10)"
+    )
+    
+    @validator('max_total_exposure')
+    def validate_total_exposure(cls, v, values):
+        """Ensure total exposure >= max position size"""
+        if 'max_position_size' in values and v < values['max_position_size']:
+            raise ValueError('max_total_exposure must be >= max_position_size')
+        return v
+
+class RiskManagementConfig(BaseModel):
+    """Risk management configuration with validation"""
+    model_config = ConfigDict(extra='forbid')
+    
+    max_daily_loss: float = Field(
+        default=0.03, 
+        ge=0.005, 
+        le=0.2, 
+        description="Maximum daily loss threshold (0.5-20%)"
+    )
+    kelly_enabled: bool = Field(
+        default=True, 
+        description="Enable Kelly Criterion position sizing"
+    )
+    risk_adjustment_enabled: bool = Field(
+        default=True, 
+        description="Enable dynamic risk adjustment based on performance"
+    )
+
+class MLConfig(BaseModel):
+    """Machine learning configuration with validation"""
+    model_config = ConfigDict(extra='forbid')
+    
+    retrain_frequency_hours: int = Field(
+        default=6, 
+        ge=1, 
+        le=168, 
+        description="ML model retrain frequency in hours (1-168)"
+    )
+    min_training_samples: int = Field(
+        default=5, 
+        ge=3, 
+        le=1000, 
+        description="Minimum training samples for ML model (3-1000)"
+    )
+    feature_importance_threshold: float = Field(
+        default=0.1, 
+        ge=0.01, 
+        le=1.0, 
+        description="Feature importance threshold for selection (1-100%)"
+    )
+
+class MonitoringConfig(BaseModel):
+    """Monitoring configuration with validation"""
+    model_config = ConfigDict(extra='forbid')
+    
+    health_check_interval: int = Field(
+        default=60, 
+        ge=10, 
+        le=3600, 
+        description="Health check interval in seconds (10-3600)"
+    )
+    slack_cooldown: int = Field(
+        default=900, 
+        ge=60, 
+        le=7200, 
+        description="Slack notification cooldown in seconds (60-7200)"
+    )
+    enable_http_endpoint: bool = Field(
+        default=True, 
+        description="Enable HTTP monitoring endpoint"
+    )
+
+class EmergencyConditionsConfig(BaseModel):
+    """Emergency conditions configuration with validation"""
+    model_config = ConfigDict(extra='forbid')
+    
+    max_consecutive_losses: int = Field(
+        default=5, 
+        ge=2, 
+        le=20, 
+        description="Maximum consecutive losses before emergency stop (2-20)"
+    )
+    daily_loss_limit: float = Field(
+        default=0.03, 
+        ge=0.005, 
+        le=0.2, 
+        description="Daily loss limit for emergency stop (0.5-20%)"
+    )
+    circuit_breaker_enabled: bool = Field(
+        default=True, 
+        description="Enable circuit breaker protection"
+    )
+
+class PerformanceTargetsConfig(BaseModel):
+    """Performance targets configuration with validation"""
+    model_config = ConfigDict(extra='forbid')
+    
+    min_sharpe_ratio: float = Field(
+        default=1.0, 
+        ge=0.1, 
+        le=10.0, 
+        description="Minimum target Sharpe ratio (0.1-10.0)"
+    )
+    max_drawdown_limit: float = Field(
+        default=0.15, 
+        ge=0.01, 
+        le=0.5, 
+        description="Maximum acceptable drawdown (1-50%)"
+    )
+    min_win_rate: float = Field(
+        default=0.55, 
+        ge=0.3, 
+        le=0.9, 
+        description="Minimum target win rate (30-90%)"
+    )
+
+class SystemXConfig(BaseModel):
+    """Complete System X configuration with validation"""
+    model_config = ConfigDict(extra='forbid')
+    
+    trading: TradingConfig = Field(default_factory=TradingConfig)
+    risk_management: RiskManagementConfig = Field(default_factory=RiskManagementConfig)
+    ml_settings: MLConfig = Field(default_factory=MLConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    emergency_conditions: EmergencyConditionsConfig = Field(default_factory=EmergencyConditionsConfig)
+    performance_targets: PerformanceTargetsConfig = Field(default_factory=PerformanceTargetsConfig)
+    
+    @validator('emergency_conditions')
+    def validate_emergency_conditions(cls, v, values):
+        """Ensure emergency conditions are consistent with risk management"""
+        if 'risk_management' in values:
+            rm = values['risk_management']
+            if v.daily_loss_limit != rm.max_daily_loss:
+                # Automatically sync the daily loss limits
+                v.daily_loss_limit = rm.max_daily_loss
+        return v
+    
+    def get_trading_params(self) -> Dict[str, Any]:
+        """Get trading parameters as dictionary for backward compatibility"""
+        return {
+            'max_position_size': self.trading.max_position_size,
+            'max_total_exposure': self.trading.max_total_exposure,
+            'stop_loss_pct': self.trading.stop_loss_pct,
+            'take_profit_pct': self.trading.take_profit_pct,
+            'max_day_trades': self.trading.max_day_trades,
+            'max_daily_loss': self.risk_management.max_daily_loss,
+            'kelly_enabled': self.risk_management.kelly_enabled,
+        }
+
 class SecurityManager:
     """Enhanced security for sensitive data encryption"""
-    def __init__(self):
+    def __init__(self) -> None:
         if SECURITY_AVAILABLE:
             self.key = self._get_or_create_key()
             self.cipher = Fernet(self.key)
         else:
             self.cipher = None
     
-    def _get_or_create_key(self):
+    def _get_or_create_key(self) -> bytes:
         try:
             key = keyring.get_password("SystemX", "encryption_key")
             if not key:
@@ -194,14 +378,14 @@ class SecurityManager:
 
 class CircuitBreaker:
     """Circuit breaker pattern for system protection"""
-    def __init__(self, failure_threshold=5, recovery_timeout=300):
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 300) -> None:
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.failure_count = 0
         self.last_failure_time = None
         self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
     
-    def call(self, func, *args, **kwargs):
+    def call(self, func: Callable, *args, **kwargs) -> Any:
         if self.state == 'OPEN':
             if time.time() - self.last_failure_time > self.recovery_timeout:
                 self.state = 'HALF_OPEN'
@@ -236,7 +420,7 @@ class SystemX:
     7. Trading Performance ✅
     """
     
-    def __init__(self, debug=True):
+    def __init__(self, debug: bool = True) -> None:
         self.debug = debug
         self.system_start_time = datetime.now()
         self.session_id = f"SystemX_{self.system_start_time.strftime('%Y%m%d_%H%M%S')}"
@@ -363,7 +547,7 @@ class SystemX:
             self.health_status = "CRITICAL_ERROR"
             self.handle_critical_error("INITIALIZATION_FAILED", e)
     
-    def load_environment(self):
+    def load_environment(self) -> None:
         """Load all environment variables"""
         env_file = "/Users/francisclase/FinRLX/the_end/.env"
         if os.path.exists(env_file):
@@ -410,7 +594,7 @@ class SystemX:
         if self.debug:
             print("🔑 Environment loaded - All credentials secured")
     
-    def load_config(self, config_file='config.yaml'):
+    def load_config(self, config_file: str = 'config.yaml') -> None:
         """Load configuration from file"""
         try:
             if not os.path.exists(config_file):
@@ -419,40 +603,103 @@ class SystemX:
                 return
                 
             with open(config_file, 'r') as f:
-                config = yaml.safe_load(f)
+                raw_config = yaml.safe_load(f)
             
-            # Apply trading config
-            if 'trading' in config:
-                self.max_position_size = config['trading'].get('max_position_size', 0.15)
-                self.max_total_exposure = config['trading'].get('max_total_exposure', 0.75)
-                self.stop_loss_pct = config['trading'].get('stop_loss_pct', 0.05)
-                self.take_profit_pct = config['trading'].get('take_profit_pct', 0.10)
-                self.max_day_trades = config['trading'].get('max_day_trades', 3)
-            
-            # Apply risk management config
-            if 'risk_management' in config:
-                self.max_daily_loss = config['risk_management'].get('max_daily_loss', 0.03)
-                self.kelly_enabled = config['risk_management'].get('kelly_enabled', True)
-            
-            # Apply ML settings
-            if 'ml_settings' in config:
-                self.ml_retrain_hours = config['ml_settings'].get('retrain_frequency_hours', 6)
-                self.min_training_samples = config['ml_settings'].get('min_training_samples', 5)
-            
-            # Apply monitoring settings
-            if 'monitoring' in config:
-                self.health_check_interval = config['monitoring'].get('health_check_interval', 60)
-                self.slack_cooldown = config['monitoring'].get('slack_cooldown', 900)
-                self.enable_http_endpoint = config['monitoring'].get('enable_http_endpoint', True)
-            
-            if self.debug:
-                print(f"✅ Configuration loaded from {config_file}")
+            # Validate configuration using Pydantic
+            try:
+                self.validated_config = SystemXConfig(**raw_config)
+                
+                # Apply validated config to system attributes
+                trading_params = self.validated_config.get_trading_params()
+                self.max_position_size = trading_params['max_position_size']
+                self.max_total_exposure = trading_params['max_total_exposure']
+                self.stop_loss_pct = trading_params['stop_loss_pct']
+                self.take_profit_pct = trading_params['take_profit_pct']
+                self.max_day_trades = trading_params['max_day_trades']
+                self.max_daily_loss = trading_params['max_daily_loss']
+                self.kelly_enabled = trading_params['kelly_enabled']
+                
+                # Apply ML settings
+                self.ml_retrain_hours = self.validated_config.ml_settings.retrain_frequency_hours
+                self.min_training_samples = self.validated_config.ml_settings.min_training_samples
+                
+                # Apply monitoring settings
+                self.health_check_interval = self.validated_config.monitoring.health_check_interval
+                self.slack_cooldown = self.validated_config.monitoring.slack_cooldown
+                self.enable_http_endpoint = self.validated_config.monitoring.enable_http_endpoint
+                
+                # Apply emergency conditions
+                self.max_consecutive_losses = self.validated_config.emergency_conditions.max_consecutive_losses
+                self.circuit_breaker_enabled = self.validated_config.emergency_conditions.circuit_breaker_enabled
+                
+                if self.debug:
+                    print(f"✅ Configuration loaded and validated from {config_file}")
+                    print(f"   Pydantic validation: PASSED")
+                    print(f"   Max position: {self.max_position_size*100}%")
+                    print(f"   Risk management: {self.stop_loss_pct*100}% SL, {self.take_profit_pct*100}% TP")
+                    print(f"   Emergency conditions: {self.max_consecutive_losses} consecutive losses")
+                
+            except Exception as validation_error:
+                if self.debug:
+                    print(f"❌ Configuration validation failed: {validation_error}")
+                    print("🔄 Using default configuration...")
+                
+                # Log validation error
+                try:
+                    self.log_system_event("CONFIG_VALIDATION_ERROR", 
+                        f"Config validation failed: {validation_error}", 
+                        "ERROR")
+                except:
+                    pass  # Ignore if logging not available yet
+                
+                # Fall back to default configuration
+                self.validated_config = SystemXConfig()
+                self._apply_default_config()
                 
         except Exception as e:
             if self.debug:
                 print(f"⚠️ Config load failed, using defaults: {e}")
+            
+            # Ensure we have a validated config even if file loading fails
+            self.validated_config = SystemXConfig()
+            self._apply_default_config()
     
-    def create_default_config(self, config_file='config.yaml'):
+    def _apply_default_config(self) -> None:
+        """Apply default configuration values"""
+        trading_params = self.validated_config.get_trading_params()
+        self.max_position_size = trading_params['max_position_size']
+        self.max_total_exposure = trading_params['max_total_exposure']
+        self.stop_loss_pct = trading_params['stop_loss_pct']
+        self.take_profit_pct = trading_params['take_profit_pct']
+        self.max_day_trades = trading_params['max_day_trades']
+        self.max_daily_loss = trading_params['max_daily_loss']
+        self.kelly_enabled = trading_params['kelly_enabled']
+        self.ml_retrain_hours = self.validated_config.ml_settings.retrain_frequency_hours
+        self.min_training_samples = self.validated_config.ml_settings.min_training_samples
+        self.health_check_interval = self.validated_config.monitoring.health_check_interval
+        self.slack_cooldown = self.validated_config.monitoring.slack_cooldown
+        self.enable_http_endpoint = self.validated_config.monitoring.enable_http_endpoint
+        self.max_consecutive_losses = self.validated_config.emergency_conditions.max_consecutive_losses
+        self.circuit_breaker_enabled = self.validated_config.emergency_conditions.circuit_breaker_enabled
+    
+    def get_config_schema(self) -> Dict[str, Any]:
+        """Get the Pydantic configuration schema for documentation"""
+        return SystemXConfig.model_json_schema()
+    
+    def validate_config_dict(self, config_dict: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """
+        Validate a configuration dictionary against the Pydantic schema
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        try:
+            SystemXConfig(**config_dict)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+    
+    def create_default_config(self, config_file: str = 'config.yaml') -> None:
         """Create default configuration file"""
         default_config = {
             'trading': {
@@ -488,7 +735,7 @@ class SystemX:
             if self.debug:
                 print(f"⚠️ Could not create config file: {e}")
     
-    def setup_connections(self):
+    def setup_connections(self) -> None:
         """Setup all external connections with error handling"""
         try:
             # Supabase connection
@@ -561,7 +808,7 @@ class SystemX:
         except Exception as e:
             raise Exception(f"Connection setup failed: {e}")
     
-    def setup_connection_pool(self):
+    def setup_connection_pool(self) -> None:
         """Setup connection pooling for better resource management"""
         try:
             # Create a thread pool for concurrent operations
@@ -582,21 +829,91 @@ class SystemX:
         except Exception as e:
             print(f"⚠️ Connection pool setup warning: {e}")
     
-    def get_client(self, account_name: str = "PRIMARY_30K"):
-        """Get the correct client object for any action"""
+    def get_client(self, account_name: str = "PRIMARY_30K") -> Any:
+        """
+        Get the correct client object for any action with enhanced error handling
+        
+        Args:
+            account_name: Name of the account ("PRIMARY_30K", "SECONDARY_30K", "TERTIARY_30K")
+            
+        Returns:
+            Alpaca client object for the specified account
+            
+        Raises:
+            ValueError: If account_name is invalid and fallback fails
+        """
         try:
-            if account_name == "PRIMARY_30K":
+            # Validate account name format
+            valid_accounts = ["PRIMARY_30K", "SECONDARY_30K", "TERTIARY_30K"]
+            if account_name not in valid_accounts:
+                warning_msg = f"⚠️ Invalid account name '{account_name}'. Valid accounts: {valid_accounts}"
+                if self.debug:
+                    print(warning_msg)
+                # Log to Supabase for monitoring
+                self.log_system_event("INVALID_ACCOUNT_WARNING", 
+                    f"Invalid account '{account_name}' requested. Valid: {valid_accounts}", 
+                    "WARNING")
+                # Fall back to primary account
                 return self.alpaca
             
+            # Return primary account client
+            if account_name == "PRIMARY_30K":
+                if self.alpaca is None:
+                    raise ValueError("Primary Alpaca client is not initialized")
+                return self.alpaca
+            
+            # Search for secondary/tertiary accounts
             for acc in self.alpaca_clients:
                 if acc["name"] == account_name:
-                    return acc["client"]
+                    client = acc.get("client")
+                    if client is None:
+                        raise ValueError(f"Client for {account_name} is None")
+                    return client
             
-            raise ValueError(f"No such account: {account_name}")
+            # Account not found in configured clients
+            error_msg = f"Account '{account_name}' not found in configured clients"
+            if self.debug:
+                print(f"❌ {error_msg}")
+                print(f"   Available accounts: {[acc['name'] for acc in self.alpaca_clients]}")
+            
+            # Log missing account error
+            self.log_system_event("ACCOUNT_NOT_FOUND", 
+                f"Account '{account_name}' not found. Available: {[acc['name'] for acc in self.alpaca_clients]}", 
+                "ERROR")
+            
+            raise ValueError(error_msg)
+            
         except Exception as e:
+            # Enhanced error handling with detailed logging
+            error_details = {
+                "error_type": "CLIENT_LOOKUP_ERROR",
+                "account_name": account_name,
+                "error_message": str(e),
+                "alpaca_client_count": len(self.alpaca_clients) if hasattr(self, 'alpaca_clients') else 0,
+                "primary_client_available": self.alpaca is not None if hasattr(self, 'alpaca') else False,
+                "timestamp": datetime.now().isoformat()
+            }
+            
             if self.debug:
                 print(f"⚠️ Client lookup error for {account_name}: {e}")
-            return self.alpaca  # Fallback to primary
+                print(f"   Error details: {error_details}")
+            
+            # Log error to Supabase for monitoring
+            self.log_system_event("CLIENT_LOOKUP_ERROR", 
+                f"Error getting client for {account_name}: {str(e)}", 
+                "ERROR")
+            
+            # Attempt graceful fallback to primary account
+            if hasattr(self, 'alpaca') and self.alpaca is not None:
+                if self.debug:
+                    print(f"🔄 Falling back to primary account for {account_name}")
+                return self.alpaca
+            else:
+                # Critical error - no clients available
+                critical_error = f"Critical error: No Alpaca clients available (requested: {account_name})"
+                if self.debug:
+                    print(f"🚨 {critical_error}")
+                raise ValueError(critical_error)
     
     def get_next_available_account(self) -> str:
         """Get next available account for trading using round-robin with day-trade checking"""
@@ -649,11 +966,11 @@ class SystemX:
                 print(f"⚠️ Error getting next account: {e}")
             return "PRIMARY_30K"
     
-    def get_pooled_connection(self):
+    def get_pooled_connection(self) -> Any:
         """Legacy method - use get_client instead"""
         return self.get_client()
     
-    def setup_trading_parameters(self):
+    def setup_trading_parameters(self) -> None:
         """Setup comprehensive trading and backtesting parameters"""
         # Trading Parameters (Production-grade)
         self.max_position_size = 0.15  # 15% max per position
@@ -693,7 +1010,7 @@ class SystemX:
             print(f"   Trading interval: {self.trading_interval//60} minutes")
             print(f"   Backtest strategies: {len(self.backtest_strategies)}")
     
-    def initialize_supabase_tables(self):
+    def initialize_supabase_tables(self) -> None:
         """Initialize Supabase integration using existing V9B tables"""
         try:
             # Use existing V9B tables for System X logging
@@ -1328,7 +1645,7 @@ class SystemX:
             # Return conservative defaults
             return 0.55, 0.08, 0.05
     
-    def set_target_portfolio(self, allocations: Dict[str, float]):
+    def set_target_portfolio(self, allocations: Dict[str, float]) -> None:
         """Set target portfolio allocations for rebalancing"""
         # Normalize allocations to sum to 1.0
         total = sum(allocations.values())
@@ -1339,7 +1656,7 @@ class SystemX:
                 for ticker, pct in self.target_portfolio.items():
                     print(f"   {ticker}: {pct:.1%}")
     
-    def update_target_allocations_from_v9b(self):
+    def update_target_allocations_from_v9b(self) -> None:
         """Dynamically update target allocations based on current V9B qualified stocks"""
         try:
             qualified_stocks = self.get_v9b_qualified_stocks()
@@ -2072,7 +2389,7 @@ class SystemX:
         except Exception:
             return {}
     
-    def get_common_reasons(self, trades):
+    def get_common_reasons(self, trades: List[Dict[str, Any]]) -> List[Tuple[str, int]]:
         """Get most common trade reasons"""
         try:
             reason_counts = {}
