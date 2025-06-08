@@ -25,10 +25,12 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Union, Callable
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 import warnings
-from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache, wraps
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import yaml
+import uuid
+import random
 import logging
 from logging.handlers import RotatingFileHandler
 warnings.filterwarnings('ignore')
@@ -495,6 +497,26 @@ class SecurityManager:
                 decrypted[k] = v
         return decrypted
 
+def rate_limit(calls_per_second=1):
+    """Rate limiting decorator to prevent API throttling"""
+    min_interval = 1.0 / calls_per_second
+    last_called = [0.0]
+    lock = threading.Lock()
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with lock:
+                elapsed = time.time() - last_called[0]
+                left_to_wait = min_interval - elapsed
+                if left_to_wait > 0:
+                    time.sleep(left_to_wait)
+                ret = func(*args, **kwargs)
+                last_called[0] = time.time()
+                return ret
+        return wrapper
+    return decorator
+
 class CircuitBreaker:
     """Circuit breaker pattern for system protection"""
     def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 300) -> None:
@@ -510,6 +532,7 @@ class CircuitBreaker:
             if self.state == 'OPEN':
                 if time.time() - self.last_failure_time > self.recovery_timeout:
                     self.state = 'HALF_OPEN'
+                    self.failure_count = 0  # Reset on transition to half-open
                 else:
                     raise Exception("Circuit breaker is OPEN")
         
@@ -561,6 +584,14 @@ class SystemX:
         self.backtest_count_lock = threading.Lock()
         self.account_balance_lock = threading.Lock()
         self.position_cache_lock = threading.Lock()
+        
+        # Add emergency stop lock and tracking
+        self.emergency_stop_lock = threading.Lock()
+        self.emergency_stop_triggered = False
+        
+        # Add lock for consecutive losses and errors
+        self.consecutive_losses_lock = threading.Lock()
+        self.consecutive_errors_lock = threading.Lock()
         
         # Setup logging system
         self.setup_logging()
@@ -633,6 +664,7 @@ class SystemX:
         self.consecutive_errors = 0
         self.error_backoff_time = 30  # Start with 30 seconds
         self.last_cache_clear = datetime.now()
+        self.last_memory_cleanup = datetime.now()
         
         # Configuration will be loaded after method definitions
         
@@ -876,6 +908,10 @@ class SystemX:
             # Ensure we have a validated config even if file loading fails
             self.validated_config = SystemXConfig()
             self._apply_default_config()
+        
+        finally:
+            # Ensure NO parameters are None
+            self._validate_no_none_parameters()
     
     def _apply_default_config(self) -> None:
         """Apply default configuration values"""
@@ -901,6 +937,64 @@ class SystemX:
         self.max_consecutive_errors = self.validated_config.operational.max_consecutive_errors
         self.backtest_days = self.validated_config.operational.backtest_days
         self.min_backtest_trades = self.validated_config.operational.min_backtest_trades
+    
+    def _validate_no_none_parameters(self) -> None:
+        """Ensure all parameters have valid values"""
+        try:
+            # Critical trading parameters
+            if self.max_position_size is None:
+                self.max_position_size = 0.15
+            if self.max_total_exposure is None:
+                self.max_total_exposure = 0.75
+            if self.stop_loss_pct is None:
+                self.stop_loss_pct = 0.05
+            if self.take_profit_pct is None:
+                self.take_profit_pct = 0.10
+            if self.max_day_trades is None:
+                self.max_day_trades = 3
+            if self.max_daily_loss is None:
+                self.max_daily_loss = 0.03
+            if self.kelly_enabled is None:
+                self.kelly_enabled = True
+            
+            # Operational parameters
+            if self.min_dts_score is None:
+                self.min_dts_score = 65.0
+            if self.min_confidence_score is None:
+                self.min_confidence_score = 7.5
+            if self.trading_interval is None:
+                self.trading_interval = 300
+            if self.backtest_interval is None:
+                self.backtest_interval = 1800
+            if self.max_consecutive_errors is None:
+                self.max_consecutive_errors = 5
+            if self.backtest_days is None:
+                self.backtest_days = 30
+            if self.min_backtest_trades is None:
+                self.min_backtest_trades = 10
+            
+            # ML and monitoring parameters
+            if self.ml_retrain_hours is None:
+                self.ml_retrain_hours = 6
+            if self.min_training_samples is None:
+                self.min_training_samples = 5
+            if self.health_check_interval is None:
+                self.health_check_interval = 60
+            if self.slack_cooldown is None:
+                self.slack_cooldown = 900
+            if self.enable_http_endpoint is None:
+                self.enable_http_endpoint = True
+            if self.max_consecutive_losses is None:
+                self.max_consecutive_losses = 5
+            if self.circuit_breaker_enabled is None:
+                self.circuit_breaker_enabled = True
+            
+            if self.debug:
+                print("✅ All configuration parameters validated - no None values")
+                
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Parameter validation error: {e}")
     
     def get_config_schema(self) -> Dict[str, Any]:
         """Get the Pydantic configuration schema for documentation"""
@@ -1026,7 +1120,7 @@ class SystemX:
             
             # Setup Polygon client for historical data with future-proof initialization
             self.polygon_available = POLYGON_AVAILABLE
-            if POLYGON_AVAILABLE and self.polygon_key:
+            if POLYGON_AVAILABLE and self.polygon_key and 'polygon_client_class' in globals():
                 try:
                     # Use dynamically determined polygon client class for future compatibility
                     self.polygon_client = polygon_client_class(self.polygon_key)
@@ -1545,13 +1639,28 @@ class SystemX:
             self.log_system_event("SCHEDULE_ERROR", f"Error getting market schedule: {e}")
             return {'is_open': False}
     
+    def update_account_balance(self):
+        """Update account balance from primary account"""
+        try:
+            account = self.alpaca.get_account()
+            with self.account_balance_lock:
+                self.account_balance = float(account.equity)
+            if self.debug:
+                print(f"💰 Account balance updated: ${self.account_balance:,.2f}")
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Failed to update account balance: {e}")
+            # Keep existing balance if update fails
+    
     def execute_trading_cycle(self):
         """Execute one complete trading cycle"""
         try:
             print(f"\n🔄 TRADING CYCLE - {datetime.now().strftime('%H:%M:%S')}")
             
-            # Get qualified stocks with caching
-            cache_key = self.get_cache_key()
+            # Update account balance first
+            self.update_account_balance()
+            
+            # Get qualified stocks (individual caching handled per ticker)
             qualified_stocks = self.get_v9b_qualified_stocks()
             if not qualified_stocks:
                 print("⚠️ No qualified stocks available for trading")
@@ -1652,7 +1761,12 @@ class SystemX:
             if not current_price:
                 return False
             
-            current_position = positions.get(ticker, {})
+            # Get the account we'll trade on
+            account_name = self.get_next_available_account()
+            position_key = f"{ticker}_{account_name}"
+            
+            # Now check position with correct key
+            current_position = positions.get(position_key, {})
             current_qty = current_position.get('qty', 0)
             
             # ENTRY LOGIC with ML enhancement
@@ -1719,11 +1833,12 @@ class SystemX:
                         trade_return = current_position.get('unrealized_pl_pct', 0) / 100
                         self.update_strategy_performance('ML_ENHANCED', trade_return)
                         
-                        # Update consecutive losses tracking
-                        if trade_return < 0:
-                            self.consecutive_losses += 1
-                        else:
-                            self.consecutive_losses = 0
+                        # Update consecutive losses tracking (thread-safe)
+                        with self.consecutive_losses_lock:
+                            if trade_return < 0:
+                                self.consecutive_losses += 1
+                            else:
+                                self.consecutive_losses = 0
                         return True
             
             return False
@@ -1747,7 +1862,10 @@ class SystemX:
                 # Create simulated order object for consistent logging
                 class SimulatedOrder:
                     def __init__(self):
-                        self.id = f"DRY_RUN_{datetime.now().strftime('%H%M%S_%f')}"
+                        unique_suffix = str(uuid.uuid4())[:8]
+                        timestamp = datetime.now().strftime('%H%M%S_%f')
+                        random_component = random.randint(100, 999)
+                        self.id = f"DRY_RUN_{timestamp}_{unique_suffix}_{random_component}"
                         self.status = 'filled'
                         self.filled_avg_price = price
                         self.filled_qty = shares
@@ -1799,10 +1917,17 @@ class SystemX:
             }
             with self.trade_journal_lock:
                 self.trade_journal.append(journal_entry)
+                # Keep only last 1000 trades in memory to prevent unbounded growth
+                if len(self.trade_journal) > 1000:
+                    self.trade_journal = self.trade_journal[-1000:]
             
             try:
-                # Add unique ID to prevent constraint violations
-                trade_log['id'] = f"{self.session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+                # Add unique ID with high entropy to prevent constraint violations
+                # Use UUID + timestamp + random for guaranteed uniqueness
+                unique_suffix = str(uuid.uuid4())[:8]
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                random_component = random.randint(1000, 9999)
+                trade_log['id'] = f"{self.session_id}_{timestamp}_{unique_suffix}_{random_component}"
                 trade_log['session_id'] = self.session_id
                 
                 with self.supabase_lock:
@@ -1932,8 +2057,9 @@ class SystemX:
             self.log_system_event("POSITION_ERROR", f"Error fetching positions: {e}")
             return {}
     
+    @rate_limit(calls_per_second=2)  # Limit to 2 calls per second for price fetching
     def get_stock_price(self, ticker: str) -> Optional[float]:
-        """Get current stock price with error handling"""
+        """Get current stock price with error handling and rate limiting"""
         try:
             trade = self.alpaca.get_latest_trade(ticker)
             return float(trade.price)
@@ -2003,37 +2129,59 @@ class SystemX:
             win_rate, avg_win, avg_loss = self.get_historical_performance(ticker)
             
             # Handle edge cases where we have insufficient data or extreme values
-            if win_rate == 0 or avg_win <= 0:
+            if win_rate == 0:
                 if self.debug:
-                    print(f"📊 Kelly: Insufficient data for {ticker}, using fallback sizing")
+                    print(f"📊 Kelly: No winning trades for {ticker}, skipping")
+                return 0
+            
+            # Check if avg_win is 0 or negative
+            if avg_win <= 0:
+                if self.debug:
+                    print(f"📊 Kelly: No positive returns for {ticker}, skipping")
                 return 0
             
             # Handle case where all trades are winners (avg_loss == 0 division by zero)
-            if avg_loss == 0 or avg_loss < 1e-10:  # Also handle near-zero losses
+            # Also handle near-zero losses that could cause extreme values
+            if avg_loss == 0 or avg_loss < 1e-8:  # Stricter threshold for near-zero
                 # Conservative sizing when no or minimal historical losses
                 kelly_fraction = 0.10  # 10% conservative allocation
                 if self.debug:
                     print(f"📊 Kelly: All/mostly winning trades for {ticker}, using conservative 10% allocation")
             else:
-                # Kelly Formula: f = (bp - q) / b
-                # Where: b = odds (avg_win/avg_loss), p = win_rate, q = 1-p
-                b = avg_win / avg_loss
-                p = win_rate
-                q = 1 - p
-                
-                # Additional safety checks for extreme b values
-                if b <= 0 or b > 100:  # Unrealistic odds ratio
-                    kelly_fraction = 0.05  # Very conservative 5%
+                # Additional safety: ensure avg_loss is significant enough for stable calculation
+                if avg_loss < 1e-6:  # Very small but non-zero losses
+                    kelly_fraction = 0.05  # Ultra-conservative for tiny losses
                     if self.debug:
-                        print(f"📊 Kelly: Extreme odds ratio b={b:.2f} for {ticker}, using minimal allocation")
+                        print(f"📊 Kelly: Very small avg_loss {avg_loss:.8f} for {ticker}, using ultra-conservative allocation")
                 else:
-                    kelly_fraction = (b * p - q) / b
-                    
-                    # Handle negative Kelly (unfavorable bet)
-                    if kelly_fraction < 0:
+                    # Kelly Formula: f = (bp - q) / b
+                    # Where: b = odds (avg_win/avg_loss), p = win_rate, q = 1-p
+                    try:
+                        b = avg_win / avg_loss
+                        p = win_rate
+                        q = 1 - p
+                        
+                        # Additional safety checks for extreme b values
+                        if b <= 0 or b > 100 or not np.isfinite(b):  # Check for inf/nan
+                            kelly_fraction = 0.05  # Very conservative 5%
+                            if self.debug:
+                                print(f"📊 Kelly: Extreme/invalid odds ratio b={b:.2f} for {ticker}, using minimal allocation")
+                        else:
+                            kelly_fraction = (b * p - q) / b
+                            
+                            # Verify the result is finite and reasonable
+                            if not np.isfinite(kelly_fraction) or kelly_fraction < -1 or kelly_fraction > 1:
+                                kelly_fraction = 0.05
+                                if self.debug:
+                                    print(f"📊 Kelly: Invalid result for {ticker}, using minimal allocation")
+                            elif kelly_fraction < 0:
+                                if self.debug:
+                                    print(f"📊 Kelly: Negative Kelly fraction {kelly_fraction:.3f} for {ticker}, skipping trade")
+                                return 0
+                    except (ZeroDivisionError, OverflowError, ValueError) as calc_error:
+                        kelly_fraction = 0.05
                         if self.debug:
-                            print(f"📊 Kelly: Negative Kelly fraction {kelly_fraction:.3f} for {ticker}, skipping trade")
-                        return 0
+                            print(f"📊 Kelly: Calculation error for {ticker}: {calc_error}, using minimal allocation")
             
             # Apply safety caps - Kelly can suggest very high allocations
             kelly_fraction = max(0, min(kelly_fraction, 0.25))  # Cap at 25%
@@ -2439,9 +2587,12 @@ class SystemX:
         # Cache key includes timestamp to ensure freshness
         return self.get_v9b_analysis(ticker)
     
-    def get_cache_key(self) -> str:
-        """Generate cache key based on current time (refreshes every 10 minutes)"""
-        return datetime.now().strftime('%Y%m%d_%H%M')[:12]  # 10-minute buckets
+    def get_cache_key(self, ticker: str = None) -> str:
+        """Generate cache key based on current time and ticker (refreshes every 10 minutes)"""
+        time_bucket = datetime.now().strftime('%Y%m%d_%H%M')[:12]  # 10-minute buckets
+        if ticker:
+            return f"{time_bucket}_{ticker}"
+        return time_bucket
     
     def check_day_trade_limit(self, account_name: str = None) -> bool:
         """Check if we can make more day trades across all accounts or specific account"""
@@ -2450,10 +2601,10 @@ class SystemX:
                 # Check specific account
                 return self._check_account_day_trades(account_name)
             
-            # Check all accounts
-            accounts_to_check = [acc['name'] for acc in self.alpaca_clients]
+            # Check ALL accounts including PRIMARY
+            all_account_names = ['PRIMARY_30K'] + [acc['name'] for acc in self.alpaca_clients]
             
-            for acc_name in accounts_to_check:
+            for acc_name in all_account_names:
                 if self._check_account_day_trades(acc_name):
                     return True  # At least one account can trade
             
@@ -2519,8 +2670,18 @@ class SystemX:
     
     def manage_existing_positions(self, positions: Dict):
         """Manage existing positions for stop loss and take profit"""
-        for ticker, position in positions.items():
+        for position_key, position in positions.items():
             try:
+                # Use existing position data fields for ticker and account
+                ticker = position.get('symbol')
+                account_name = position.get('account_name')
+                
+                # Fallback to parsing position key if fields are missing
+                if not ticker or not account_name:
+                    parts = position_key.split('_')
+                    ticker = ticker or parts[0]
+                    account_name = account_name or '_'.join(parts[1:])
+                
                 unrealized_pl_pct = position.get('unrealized_pl_pct', 0)
                 
                 # Check stop loss
@@ -2528,17 +2689,17 @@ class SystemX:
                     current_price = self.get_stock_price(ticker)
                     if current_price:
                         reason = f"STOP_LOSS_MGMT ({unrealized_pl_pct:.1f}%)"
-                        self.execute_trade(ticker, position['qty'], 'sell', current_price, reason)
+                        self.execute_trade(ticker, position['qty'], 'sell', current_price, reason, account_name)
                 
                 # Check take profit
                 elif unrealized_pl_pct > self.take_profit_pct * 100:
                     current_price = self.get_stock_price(ticker)
                     if current_price:
                         reason = f"TAKE_PROFIT_MGMT ({unrealized_pl_pct:.1f}%)"
-                        self.execute_trade(ticker, position['qty'], 'sell', current_price, reason)
+                        self.execute_trade(ticker, position['qty'], 'sell', current_price, reason, account_name)
                         
             except Exception as e:
-                self.log_system_event("POSITION_MGMT_ERROR", f"Error managing position {ticker}: {e}")
+                self.log_system_event("POSITION_MGMT_ERROR", f"Error managing position {position_key}: {e}")
     
     def should_rebalance(self) -> bool:
         """Check if portfolio rebalancing is needed"""
@@ -2660,10 +2821,12 @@ class SystemX:
                 daily_return = (current_value / self.portfolio_values[-2] - 1)
                 self.daily_returns.append(daily_return)
             
-            # Keep only recent data (last 252 trading days)
-            if len(self.daily_returns) > 252:
-                self.daily_returns = self.daily_returns[-252:]
-                self.portfolio_values = self.portfolio_values[-252:]
+            # Proactive memory management - keep only recent data
+            max_portfolio_history = 252  # 1 trading year
+            if len(self.daily_returns) > max_portfolio_history:
+                self.daily_returns = self.daily_returns[-max_portfolio_history:]
+            if len(self.portfolio_values) > max_portfolio_history + 1:  # +1 for daily return calc
+                self.portfolio_values = self.portfolio_values[-(max_portfolio_history + 1):]
             
             # Calculate metrics if we have enough data
             if len(self.daily_returns) >= 30:  # At least 30 days
@@ -3516,9 +3679,11 @@ class SystemX:
                 self.emergency_stop("DAILY_LOSS_LIMIT", f"Daily loss: {daily_loss:.2f}% (vs ${total_starting_balance:,.0f} total baseline)")
                 return True
             
-            # Consecutive losing trades
-            if self.consecutive_losses >= 5:
-                self.emergency_stop("CONSECUTIVE_LOSSES", f"Lost {self.consecutive_losses} trades in a row")
+            # Consecutive losing trades (thread-safe check)
+            with self.consecutive_losses_lock:
+                consecutive_losses = self.consecutive_losses
+            if consecutive_losses >= 5:
+                self.emergency_stop("CONSECUTIVE_LOSSES", f"Lost {consecutive_losses} trades in a row")
                 return True
             
             # Technical failures
@@ -3540,7 +3705,12 @@ class SystemX:
             return False
     
     def emergency_stop(self, reason: str, details: str):
-        """Execute emergency stop"""
+        """Thread-safe emergency stop"""
+        with self.emergency_stop_lock:
+            if self.emergency_stop_triggered:
+                return  # Already triggered
+            self.emergency_stop_triggered = True
+        
         try:
             print(f"🚨 EMERGENCY STOP ACTIVATED: {reason}")
             print(f"   Details: {details}")
@@ -3726,8 +3896,6 @@ class SystemX:
                 print(f"⚠️ Polygon not available for {ticker}, using Alpaca fallback")
                 return self.get_alpaca_historical_data(ticker, days_back)
             
-            from datetime import timedelta
-            
             end_date = datetime.now().date()
             start_date = end_date - timedelta(days=days_back)
             
@@ -3771,8 +3939,6 @@ class SystemX:
     def get_alpaca_historical_data(self, ticker: str, days_back: int = 30) -> Optional[pd.DataFrame]:
         """Fallback method to get historical data from Alpaca"""
         try:
-            from datetime import timedelta
-            
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back + 10)  # Buffer for weekends
             
@@ -3824,8 +3990,6 @@ class SystemX:
     def get_simple_alpaca_data(self, ticker: str, days_back: int = 30) -> Optional[pd.DataFrame]:
         """Simple Alpaca data using direct API (no FinRL processor)"""
         try:
-            from datetime import timedelta
-            
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back + 10)
             
@@ -4344,7 +4508,10 @@ class SystemX:
                 # Attempt 1: Try backtest_results table
                 if not success:
                     try:
-                        unique_id = f"{self.session_id}_{strategy}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+                        unique_suffix = str(uuid.uuid4())[:8]
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                        random_component = random.randint(1000, 9999)
+                        unique_id = f"{self.session_id}_{strategy}_{timestamp}_{unique_suffix}_{random_component}"
                         backtest_log = {
                             'id': unique_id,
                             'run_id': f"{self.session_id}_{strategy}_{datetime.now().strftime('%H%M%S')}",
@@ -4556,7 +4723,10 @@ class SystemX:
             self.error_count += 1
             error_count = self.error_count
         
-        self.consecutive_errors += 1
+        with self.consecutive_errors_lock:
+            self.consecutive_errors += 1
+            consecutive_errors_count = self.consecutive_errors
+        
         error_msg = f"{error_type}: {str(error)}"
         
         print(f"❌ TRADING ERROR: {error_msg}")
@@ -4564,10 +4734,13 @@ class SystemX:
         # Log error
         self.log_system_event(error_type, error_msg, "ERROR")
         
-        # Implement exponential backoff after consecutive errors
-        if self.consecutive_errors >= 3:
-            backoff_time = min(300, self.error_backoff_time * (2 ** (self.consecutive_errors - 3)))
-            print(f"⏳ Error backoff: waiting {backoff_time}s after {self.consecutive_errors} consecutive errors")
+        # Implement exponential backoff with jitter after consecutive errors
+        if consecutive_errors_count >= 3:
+            base_backoff = min(300, self.error_backoff_time * (2 ** (consecutive_errors_count - 3)))
+            # Add jitter: 0-20% of backoff time to prevent thundering herd
+            jitter = random.uniform(0, base_backoff * 0.2)
+            backoff_time = base_backoff + jitter
+            print(f"⏳ Error backoff: waiting {backoff_time:.1f}s after {consecutive_errors_count} consecutive errors")
             time.sleep(backoff_time)
             self.error_backoff_time = min(300, self.error_backoff_time * 1.5)  # Increase backoff time
         
@@ -4576,13 +4749,64 @@ class SystemX:
             self.send_slack_notification("⚠️ System X Trading Issues", 
                 f"Multiple trading errors: {error_count}\nLatest: {error_msg}")
     
+    def cleanup_memory_resources(self):
+        """Comprehensive memory cleanup to prevent resource leaks"""
+        try:
+            cleanup_stats = {}
+            
+            # Clear LRU caches
+            try:
+                self.get_cached_v9b_analysis.cache_clear()
+                cleanup_stats['lru_cache'] = 'cleared'
+            except Exception:
+                cleanup_stats['lru_cache'] = 'error'
+            
+            # Trim trade journal to last 24 hours only
+            cutoff_time = datetime.now() - timedelta(hours=24)
+            with self.trade_journal_lock:
+                original_count = len(self.trade_journal)
+                self.trade_journal = [
+                    trade for trade in self.trade_journal 
+                    if trade.get('timestamp', datetime.min) > cutoff_time
+                ][:500]  # Also cap at 500 most recent
+                cleanup_stats['trade_journal'] = f"{original_count} -> {len(self.trade_journal)}"
+            
+            # Trim portfolio values and daily returns
+            max_history = 252  # 1 trading year
+            if len(self.portfolio_values) > max_history + 10:
+                self.portfolio_values = self.portfolio_values[-max_history:]
+                cleanup_stats['portfolio_values'] = f"trimmed to {len(self.portfolio_values)}"
+            
+            if len(self.daily_returns) > max_history + 10:
+                self.daily_returns = self.daily_returns[-max_history:]
+                cleanup_stats['daily_returns'] = f"trimmed to {len(self.daily_returns)}"
+            
+            # Trim emergency conditions to last 50
+            if len(self.emergency_conditions) > 50:
+                self.emergency_conditions = self.emergency_conditions[-50:]
+                cleanup_stats['emergency_conditions'] = f"trimmed to {len(self.emergency_conditions)}"
+            
+            # Clear position cache to force fresh data
+            with self.position_cache_lock:
+                self.position_cache = {}
+                self.position_cache_time = datetime.min
+                cleanup_stats['position_cache'] = 'cleared'
+            
+            if self.debug:
+                print(f"🧹 Memory cleanup stats: {cleanup_stats}")
+                
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Memory cleanup error: {e}")
+    
     def reset_error_counters(self):
         """Reset error counters on successful operations"""
-        if self.consecutive_errors > 0:
-            self.consecutive_errors = 0
-            self.error_backoff_time = 30  # Reset to initial backoff time
-            if self.debug:
-                print("✅ Error counters reset - system recovering")
+        with self.consecutive_errors_lock:
+            if self.consecutive_errors > 0:
+                self.consecutive_errors = 0
+                self.error_backoff_time = 30  # Reset to initial backoff time
+                if self.debug:
+                    print("✅ Error counters reset - system recovering")
     
     def handle_backtesting_error(self, error_type: str, error: Exception):
         """Handle backtesting-specific errors"""
@@ -4700,16 +4924,16 @@ class SystemX:
                               f"Errors: {self.error_count} | Trades: {self.trade_count} | "
                               f"Backtests: {self.backtest_count}")
                 
-                # Clear LRU cache every hour to prevent memory leaks
+                # Comprehensive memory cleanup every hour
                 if (current_time - self.last_cache_clear).total_seconds() >= 3600:  # 1 hour
                     try:
-                        self.get_cached_v9b_analysis.cache_clear()
+                        self.cleanup_memory_resources()
                         self.last_cache_clear = current_time
                         if self.debug:
-                            print("🧹 LRU cache cleared - preventing memory leaks")
+                            print("🧹 Memory cleanup completed - preventing memory leaks")
                     except Exception as e:
                         if self.debug:
-                            print(f"⚠️ Cache clear error: {e}")
+                            print(f"⚠️ Memory cleanup error: {e}")
                 
                 # V9B data consistency monitoring every 30 minutes
                 if not hasattr(self, 'last_pipeline_check'):
