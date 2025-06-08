@@ -23,7 +23,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Union, Callable
-from pydantic import BaseModel, Field, validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 import warnings
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
@@ -212,10 +212,11 @@ class TradingConfig(BaseModel):
         description="Maximum day trades per account (0-10)"
     )
     
-    @validator('max_total_exposure')
-    def validate_total_exposure(cls, v, values):
+    @field_validator('max_total_exposure')
+    @classmethod
+    def validate_total_exposure(cls, v, info):
         """Ensure total exposure >= max position size"""
-        if 'max_position_size' in values and v < values['max_position_size']:
+        if info.data and 'max_position_size' in info.data and v < info.data['max_position_size']:
             raise ValueError('max_total_exposure must be >= max_position_size')
         return v
 
@@ -326,6 +327,53 @@ class PerformanceTargetsConfig(BaseModel):
         description="Minimum target win rate (30-90%)"
     )
 
+class OperationalConfig(BaseModel):
+    """Operational parameters configuration with validation"""
+    model_config = ConfigDict(extra='forbid')
+    
+    min_dts_score: float = Field(
+        default=65.0, 
+        ge=50.0, 
+        le=100.0, 
+        description="Minimum DTS score for stock qualification (50-100)"
+    )
+    min_confidence_score: float = Field(
+        default=7.5, 
+        ge=5.0, 
+        le=10.0, 
+        description="Minimum confidence score for trading signals (5-10)"
+    )
+    trading_interval: int = Field(
+        default=300, 
+        ge=60, 
+        le=1800, 
+        description="Trading cycle interval in seconds (60-1800)"
+    )
+    backtest_interval: int = Field(
+        default=1800, 
+        ge=300, 
+        le=7200, 
+        description="Backtesting cycle interval in seconds (300-7200)"
+    )
+    max_consecutive_errors: int = Field(
+        default=5, 
+        ge=3, 
+        le=15, 
+        description="Maximum consecutive errors before shutdown (3-15)"
+    )
+    backtest_days: int = Field(
+        default=30, 
+        ge=7, 
+        le=90, 
+        description="Historical data days for backtesting (7-90)"
+    )
+    min_backtest_trades: int = Field(
+        default=10, 
+        ge=5, 
+        le=50, 
+        description="Minimum trades for valid backtest (5-50)"
+    )
+
 class SystemXConfig(BaseModel):
     """Complete System X configuration with validation"""
     model_config = ConfigDict(extra='forbid')
@@ -336,12 +384,14 @@ class SystemXConfig(BaseModel):
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     emergency_conditions: EmergencyConditionsConfig = Field(default_factory=EmergencyConditionsConfig)
     performance_targets: PerformanceTargetsConfig = Field(default_factory=PerformanceTargetsConfig)
+    operational: OperationalConfig = Field(default_factory=OperationalConfig)
     
-    @validator('emergency_conditions')
-    def validate_emergency_conditions(cls, v, values):
+    @field_validator('emergency_conditions')
+    @classmethod
+    def validate_emergency_conditions(cls, v, info):
         """Ensure emergency conditions are consistent with risk management"""
-        if 'risk_management' in values:
-            rm = values['risk_management']
+        if hasattr(info, 'data') and 'risk_management' in info.data:
+            rm = info.data['risk_management']
             if v.daily_loss_limit != rm.max_daily_loss:
                 # Automatically sync the daily loss limits
                 v.daily_loss_limit = rm.max_daily_loss
@@ -421,7 +471,8 @@ class SecurityManager:
             if v and ('KEY' in k or 'SECRET' in k or 'PASSWORD' in k):
                 try:
                     encrypted[k] = self.cipher.encrypt(str(v).encode()).decode()
-                except:
+                except Exception as e:
+                    print(f"⚠️ Encryption failed for {k}: {e}")
                     encrypted[k] = v  # Fallback to unencrypted
             else:
                 encrypted[k] = v
@@ -436,8 +487,10 @@ class SecurityManager:
             if v and ('KEY' in k or 'SECRET' in k or 'PASSWORD' in k):
                 try:
                     decrypted[k] = self.cipher.decrypt(v.encode()).decode()
-                except:
-                    decrypted[k] = v  # Assume already decrypted
+                except Exception as e:
+                    # Critical security failure - log and raise error
+                    print(f"🚨 CRITICAL: Failed to decrypt credential for key '{k}'. System cannot proceed safely.")
+                    raise RuntimeError(f"Decryption failed for {k}: {e}")
             else:
                 decrypted[k] = v
         return decrypted
@@ -783,6 +836,15 @@ class SystemX:
                 self.max_consecutive_losses = self.validated_config.emergency_conditions.max_consecutive_losses
                 self.circuit_breaker_enabled = self.validated_config.emergency_conditions.circuit_breaker_enabled
                 
+                # Apply operational parameters
+                self.min_dts_score = self.validated_config.operational.min_dts_score
+                self.min_confidence_score = self.validated_config.operational.min_confidence_score
+                self.trading_interval = self.validated_config.operational.trading_interval
+                self.backtest_interval = self.validated_config.operational.backtest_interval
+                self.max_consecutive_errors = self.validated_config.operational.max_consecutive_errors
+                self.backtest_days = self.validated_config.operational.backtest_days
+                self.min_backtest_trades = self.validated_config.operational.min_backtest_trades
+                
                 if self.debug:
                     print(f"✅ Configuration loaded and validated from {config_file}")
                     print(f"   Pydantic validation: PASSED")
@@ -832,6 +894,13 @@ class SystemX:
         self.enable_http_endpoint = self.validated_config.monitoring.enable_http_endpoint
         self.max_consecutive_losses = self.validated_config.emergency_conditions.max_consecutive_losses
         self.circuit_breaker_enabled = self.validated_config.emergency_conditions.circuit_breaker_enabled
+        self.min_dts_score = self.validated_config.operational.min_dts_score
+        self.min_confidence_score = self.validated_config.operational.min_confidence_score
+        self.trading_interval = self.validated_config.operational.trading_interval
+        self.backtest_interval = self.validated_config.operational.backtest_interval
+        self.max_consecutive_errors = self.validated_config.operational.max_consecutive_errors
+        self.backtest_days = self.validated_config.operational.backtest_days
+        self.min_backtest_trades = self.validated_config.operational.min_backtest_trades
     
     def get_config_schema(self) -> Dict[str, Any]:
         """Get the Pydantic configuration schema for documentation"""
@@ -874,6 +943,25 @@ class SystemX:
                 'health_check_interval': 60,
                 'slack_cooldown': 900,
                 'enable_http_endpoint': True
+            },
+            'emergency_conditions': {
+                'max_consecutive_losses': 5,
+                'daily_loss_limit': 0.03,
+                'circuit_breaker_enabled': True
+            },
+            'performance_targets': {
+                'min_sharpe_ratio': 1.0,
+                'max_drawdown_limit': 0.15,
+                'min_win_rate': 0.55
+            },
+            'operational': {
+                'min_dts_score': 65.0,
+                'min_confidence_score': 7.5,
+                'trading_interval': 300,
+                'backtest_interval': 1800,
+                'max_consecutive_errors': 5,
+                'backtest_days': 30,
+                'min_backtest_trades': 10
             }
         }
         
@@ -1146,8 +1234,6 @@ class SystemX:
         # Trading Parameters - set by config
         self.max_position_size = None
         self.max_total_exposure = None
-        self.min_dts_score = 65  # Keep this as operational parameter
-        self.min_confidence_score = 7.5  # Keep this as operational parameter
         
         # Risk Management - set by config
         self.stop_loss_pct = None
@@ -1156,15 +1242,17 @@ class SystemX:
         self.max_day_trades = None
         self.kelly_enabled = None
         
-        # Operational Parameters - these remain as hardcoded since not in config
-        self.trading_interval = 300  # 5 minutes between trading checks
-        self.backtest_interval = 1800  # 30 minutes between backtests
-        self.max_consecutive_errors = 5  # Error tolerance
+        # Operational Parameters - now set by config
+        self.min_dts_score = None
+        self.min_confidence_score = None
+        self.trading_interval = None
+        self.backtest_interval = None
+        self.max_consecutive_errors = None
+        self.backtest_days = None
+        self.min_backtest_trades = None
         
-        # Backtesting Parameters  
-        self.backtest_days = 30  # Days of historical data
+        # Static Parameters (not configurable)
         self.backtest_strategies = ['PPO', 'V9B_MOMENTUM', 'MEAN_REVERSION']
-        self.min_backtest_trades = 10  # Minimum trades for valid backtest
         
         # Performance Tracking
         self.daily_performance_targets = {
@@ -1207,15 +1295,17 @@ class SystemX:
             self.supabase_logging_enabled = False
     
     def get_v9b_qualified_stocks(self) -> List[Dict]:
-        """Get high-quality qualified stocks from V9B system"""
+        """Get high-quality qualified stocks from V9B system with fallback detection"""
         try:
-            # Get qualified stocks with enhanced filtering (thread-safe)
+            # Primary source: Get qualified stocks from analyzed_stocks table (thread-safe)
             with self.supabase_lock:
                 response = self.supabase.table('analyzed_stocks').select(
                     'ticker, dts_score, dts_qualification, squeeze_score, trend_score, position_size_actual'
                 ).gte('dts_score', self.min_dts_score).order('dts_score', desc=True).limit(20).execute()
             
             qualified_stocks = []
+            primary_source_count = 0
+            
             if response.data:
                 for stock in response.data:
                     ticker = stock.get('ticker', '')
@@ -1236,28 +1326,84 @@ class SystemX:
                             'position_size': stock.get('position_size_actual', 0),
                             'v9b_confidence': analysis.get('combined_score', 0),
                             'claude_analysis': analysis.get('claude_analysis', ''),
-                            'last_updated': datetime.now().isoformat()
+                            'last_updated': datetime.now().isoformat(),
+                            'source': 'analyzed_stocks'
                         })
+                        primary_source_count += 1
+            
+            # Fallback: Check v9_multi_source_analysis table for recent stocks if primary is insufficient
+            if len(qualified_stocks) < 5:
+                if self.debug:
+                    print(f"🔄 Primary source yielded {primary_source_count} stocks, checking fallback...")
                 
-                # Remove duplicates and take top performers
-                seen = set()
-                unique_stocks = []
-                for stock in qualified_stocks:
-                    if stock['ticker'] not in seen:
-                        seen.add(stock['ticker'])
-                        unique_stocks.append(stock)
+                try:
+                    # Get recent analysis from v9_multi_source_analysis table (last 24 hours)
+                    cutoff_time = (datetime.now() - timedelta(hours=24)).isoformat()
+                    
+                    with self.supabase_lock:
+                        fallback_response = self.supabase.table('v9_multi_source_analysis').select(
+                            'ticker, v9_combined_score, squeeze_confidence_score, claude_analysis, analysis_timestamp'
+                        ).gte('analysis_timestamp', cutoff_time).gte('v9_combined_score', 7.0).order('v9_combined_score', desc=True).limit(15).execute()
+                    
+                    if fallback_response.data:
+                        existing_tickers = {stock['ticker'] for stock in qualified_stocks}
+                        fallback_count = 0
+                        
+                        for stock in fallback_response.data:
+                            ticker = stock.get('ticker', '')
+                            if (ticker and 
+                                ticker not in existing_tickers and
+                                not ticker.startswith('TEST') and 
+                                len(ticker) <= 5 and 
+                                ticker.isalpha() and
+                                stock.get('v9_combined_score', 0) >= 7.0):
+                                
+                                # Convert V9B score to estimated DTS score for consistency
+                                estimated_dts = min(75, max(60, stock.get('v9_combined_score', 0) * 8))
+                                
+                                qualified_stocks.append({
+                                    'ticker': ticker,
+                                    'dts_score': estimated_dts,
+                                    'squeeze_score': stock.get('squeeze_confidence_score', 0),
+                                    'trend_score': 0,  # Not available in v9_multi_source_analysis
+                                    'position_size': 0.1,  # Default position size
+                                    'v9b_confidence': stock.get('v9_combined_score', 0),
+                                    'claude_analysis': stock.get('claude_analysis', ''),
+                                    'last_updated': stock.get('analysis_timestamp', datetime.now().isoformat()),
+                                    'source': 'v9_multi_source_analysis_fallback'
+                                })
+                                fallback_count += 1
+                                
+                                # Limit fallback additions
+                                if fallback_count >= 8 or len(qualified_stocks) >= 12:
+                                    break
+                        
+                        if fallback_count > 0 and self.debug:
+                            print(f"🎯 Added {fallback_count} stocks from fallback source")
                 
-                top_stocks = unique_stocks[:8]  # Top 8 for diversification
-                
-                if self.debug and top_stocks:
-                    print(f"🎯 V9B Qualified Stocks ({len(top_stocks)}):")
-                    for stock in top_stocks[:5]:  # Show top 5
-                        print(f"   {stock['ticker']}: DTS {stock['dts_score']:.1f}, V9B {stock['v9b_confidence']:.1f}")
-                
-                return top_stocks
-            else:
-                self.log_system_event("NO_QUALIFIED_STOCKS", "No V9B qualified stocks found")
-                return []
+                except Exception as fallback_error:
+                    if self.debug:
+                        print(f"⚠️ Fallback detection failed: {fallback_error}")
+            
+            # Remove duplicates and take top performers
+            seen = set()
+            unique_stocks = []
+            for stock in qualified_stocks:
+                if stock['ticker'] not in seen:
+                    seen.add(stock['ticker'])
+                    unique_stocks.append(stock)
+            
+            # Sort by DTS score (or estimated DTS for fallback stocks)
+            unique_stocks.sort(key=lambda x: x['dts_score'], reverse=True)
+            top_stocks = unique_stocks[:8]  # Top 8 for diversification
+            
+            if self.debug and top_stocks:
+                print(f"🎯 V9B Qualified Stocks ({len(top_stocks)}):")
+                for stock in top_stocks[:5]:  # Show top 5
+                    source_indicator = " (F)" if stock.get('source', '').endswith('fallback') else ""
+                    print(f"   {stock['ticker']}: DTS {stock['dts_score']:.1f}, V9B {stock['v9b_confidence']:.1f}{source_indicator}")
+            
+            return top_stocks
                 
         except Exception as e:
             self.log_system_event("V9B_ERROR", f"Error getting qualified stocks: {e}")
@@ -1287,6 +1433,85 @@ class SystemX:
             if self.debug:
                 self.logger.warning(f"⚠️ V9B analysis error for {ticker}: {e}")
             return {}
+    
+    def monitor_v9b_data_consistency(self) -> Dict:
+        """Monitor V9B data pipeline consistency and report gaps"""
+        try:
+            # Check recent V9B sessions and their data completeness
+            cutoff_time = (datetime.now() - timedelta(hours=6)).isoformat()
+            
+            with self.supabase_lock:
+                # Get recent completed sessions
+                sessions_response = self.supabase.table('v9_session_metadata').select(
+                    'session_id, status, stocks_processed, created_at'
+                ).eq('status', 'completed').gte('created_at', cutoff_time).order('created_at', desc=True).limit(10).execute()
+                
+                # Count records in analyzed_stocks table (primary source for System X)
+                analyzed_stocks_response = self.supabase.table('analyzed_stocks').select(
+                    'ticker', count='exact'
+                ).gte('created_at', cutoff_time).execute()
+                
+                # Count records in v9_multi_source_analysis table (fallback source)
+                multi_source_response = self.supabase.table('v9_multi_source_analysis').select(
+                    'ticker', count='exact'
+                ).gte('analysis_timestamp', cutoff_time).execute()
+            
+            completed_sessions = len(sessions_response.data) if sessions_response.data else 0
+            analyzed_stocks_count = analyzed_stocks_response.count or 0
+            multi_source_count = multi_source_response.count or 0
+            
+            # Calculate data pipeline health
+            pipeline_health = "HEALTHY"
+            issues = []
+            
+            if completed_sessions > 0 and analyzed_stocks_count == 0:
+                pipeline_health = "CRITICAL"
+                issues.append("No records in analyzed_stocks despite completed sessions")
+            elif completed_sessions > 2 and analyzed_stocks_count < (completed_sessions * 5):
+                pipeline_health = "DEGRADED" 
+                issues.append(f"Low analyzed_stocks ratio: {analyzed_stocks_count} records for {completed_sessions} sessions")
+            
+            if multi_source_count < (completed_sessions * 10):
+                issues.append(f"Low multi_source coverage: {multi_source_count} records for {completed_sessions} sessions")
+            
+            monitoring_report = {
+                'timestamp': datetime.now().isoformat(),
+                'pipeline_health': pipeline_health,
+                'completed_sessions_6h': completed_sessions,
+                'analyzed_stocks_count_6h': analyzed_stocks_count,
+                'multi_source_count_6h': multi_source_count,
+                'issues': issues,
+                'recommendation': self._get_pipeline_recommendation(pipeline_health, issues)
+            }
+            
+            # Log critical issues
+            if pipeline_health == "CRITICAL":
+                self.log_system_event("V9B_PIPELINE_CRITICAL", f"Data pipeline issues: {', '.join(issues)}")
+                self.send_slack_notification("🚨 V9B Pipeline Alert", 
+                    f"Critical data pipeline issues detected:\n{chr(10).join(issues)}")
+            elif pipeline_health == "DEGRADED":
+                self.log_system_event("V9B_PIPELINE_DEGRADED", f"Pipeline performance issues: {', '.join(issues)}")
+            
+            return monitoring_report
+                
+        except Exception as e:
+            error_report = {
+                'timestamp': datetime.now().isoformat(),
+                'pipeline_health': 'UNKNOWN',
+                'error': str(e),
+                'recommendation': 'Check Supabase connectivity and table permissions'
+            }
+            self.log_system_event("V9B_MONITORING_ERROR", f"Pipeline monitoring failed: {e}")
+            return error_report
+    
+    def _get_pipeline_recommendation(self, health: str, issues: List[str]) -> str:
+        """Get recommendation based on pipeline health assessment"""
+        if health == "CRITICAL":
+            return "IMMEDIATE ACTION: Fix V9B data pipeline - analysis results not reaching analyzed_stocks table"
+        elif health == "DEGRADED":
+            return "INVESTIGATION NEEDED: Check V9B session completion and data storage processes"
+        else:
+            return "Pipeline operating normally - continue monitoring"
     
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
         """Safely convert value to float, handling None and invalid types"""
@@ -1339,7 +1564,9 @@ class SystemX:
             # Get current positions
             positions = self.get_current_positions()
             total_exposure = sum(pos['market_value'] for pos in positions.values())
-            exposure_pct = total_exposure / self.account_balance
+            with self.account_balance_lock:
+                account_balance = self.account_balance
+            exposure_pct = total_exposure / account_balance if account_balance > 0 else 0
             
             print(f"📊 Portfolio Status: ${total_exposure:,.0f} exposure ({exposure_pct:.1%})")
             
@@ -1748,8 +1975,10 @@ class SystemX:
                 if kelly_size > 0:
                     return kelly_size
             
-            # Fallback to basic position sizing
-            base_size = self.account_balance * self.max_position_size * confidence_multiplier
+            # Fallback to basic position sizing (thread-safe account balance access)
+            with self.account_balance_lock:
+                account_balance = self.account_balance
+            base_size = account_balance * self.max_position_size * confidence_multiplier
             
             # Check available cash
             account = self.alpaca.get_account()
@@ -2908,80 +3137,94 @@ class SystemX:
             print("📊 Metrics publishing started (30s intervals)")
     
     def publish_all_metrics(self):
-        """Publish all system metrics to Redis"""
+        """Publish all system metrics to Redis using efficient HASH data types"""
         try:
             # Skip if Redis is not connected
             if not getattr(self, 'redis_connected', False):
                 return
-            # Core metrics
-            metrics = {
-                'timestamp': datetime.now().isoformat(),
+                
+            current_time = datetime.now().isoformat()
+            positions = self.get_current_positions()
+            trading_signals = self.get_current_signals()
+            
+            # Use Redis pipeline for atomic operations
+            pipe = self.redis_client.pipeline()
+            
+            # Core system metrics using HASH
+            pipe.hset("systemx:core", mapping={
+                'timestamp': current_time,
                 'session_id': self.session_id,
-                'account_balance': self.account_balance,
-                'daily_pnl': 0,  # Calculate actual daily P&L
-                'daily_pnl_pct': 0,
-                'positions': self.get_current_positions(),
-                'trading_signals': self.get_current_signals(),
-                'market_open': self.is_market_open(),
-                'performance': {
-                    'sharpe_ratio': self.sharpe_ratio,
-                    'sortino_ratio': self.sortino_ratio,
-                    'max_drawdown': self.max_drawdown,
-                    'var_95': self.var_95,
-                    'risk_adjustment': self.risk_adjustment_factor
-                },
-                'trading': {
-                    'trades_today': self.trade_count,
-                    'positions': len(self.get_current_positions()),
-                    'exposure': self.calculate_current_exposure(),
-                    'trading_enabled': self.trading_enabled
-                },
-                'ml_model': {
-                    'available': ML_AVAILABLE and self.ml_model is not None,
-                    'feature_importance': self.feature_importance
-                },
-                'strategy_performance': self.strategy_performance,
-                'pattern_analysis': self.pattern_analysis
-            }
+                'account_balance': str(self.account_balance),
+                'daily_pnl': '0',  # Calculate actual daily P&L
+                'daily_pnl_pct': '0',
+                'market_open': str(self.is_market_open()),
+                'health_status': self.health_status,
+                'trading_enabled': str(self.trading_enabled)
+            })
+            pipe.expire("systemx:core", 120)
             
-            # Publish main metrics
-            self.redis_client.setex("systemx:metrics", 120, json.dumps(metrics))
+            # Performance metrics using HASH
+            pipe.hset("systemx:performance", mapping={
+                'timestamp': current_time,
+                'sharpe_ratio': str(self.sharpe_ratio),
+                'sortino_ratio': str(self.sortino_ratio),
+                'max_drawdown': str(self.max_drawdown),
+                'var_95': str(self.var_95),
+                'risk_adjustment': str(self.risk_adjustment_factor)
+            })
+            pipe.expire("systemx:performance", 120)
             
-            # Publish health data
+            # Trading metrics using HASH
+            pipe.hset("systemx:trading", mapping={
+                'timestamp': current_time,
+                'trades_today': str(self.trade_count),
+                'position_count': str(len(positions)),
+                'current_exposure': str(self.calculate_current_exposure()),
+                'trading_enabled': str(self.trading_enabled)
+            })
+            pipe.expire("systemx:trading", 120)
+            
+            # ML model metrics using HASH
+            pipe.hset("systemx:ml_model", mapping={
+                'timestamp': current_time,
+                'available': str(ML_AVAILABLE and self.ml_model is not None),
+                'feature_importance': json.dumps(self.feature_importance) if self.feature_importance else '{}'
+            })
+            pipe.expire("systemx:ml_model", 120)
+            
+            # Configuration using HASH for granular access
+            pipe.hset("systemx:config", mapping={
+                'timestamp': current_time,
+                'max_position_size': str(self.max_position_size),
+                'max_total_exposure': str(self.max_total_exposure),
+                'stop_loss_pct': str(self.stop_loss_pct),
+                'take_profit_pct': str(self.take_profit_pct),
+                'kelly_enabled': str(self.kelly_enabled),
+                'trading_enabled': str(self.trading_enabled)
+            })
+            pipe.expire("systemx:config", 300)
+            
+            # Health data as JSON (complex nested structure)
             health_data = self.perform_health_check()
-            self.redis_client.setex("systemx:health", 120, json.dumps(health_data))
+            pipe.setex("systemx:health", 120, json.dumps(health_data))
             
-            # Publish live data
-            live_data = {
-                'timestamp': datetime.now().isoformat(),
-                'account_equity': self.account_balance,
-                'daily_pnl': 0,
-                'daily_pnl_pct': 0,
-                'positions': self.get_current_positions(),
-                'trading_signals': self.get_current_signals(),
-                'market_open': self.is_market_open()
-            }
-            self.redis_client.setex("systemx:live_data", 120, json.dumps(live_data))
+            # Complex data structures as JSON (positions, signals, stocks)
+            pipe.setex("systemx:positions", 120, json.dumps(positions))
+            pipe.setex("systemx:trading_signals", 120, json.dumps(trading_signals))
             
-            # Publish qualified stocks
             qualified_stocks = self.get_v9b_qualified_stocks()
-            self.redis_client.setex("systemx:qualified_stocks", 300, json.dumps(qualified_stocks))
+            pipe.setex("systemx:qualified_stocks", 300, json.dumps(qualified_stocks))
             
-            # Publish config
-            config_data = {
-                'max_position_size': self.max_position_size,
-                'max_total_exposure': self.max_total_exposure,
-                'stop_loss_pct': self.stop_loss_pct,
-                'take_profit_pct': self.take_profit_pct,
-                'kelly_enabled': self.kelly_enabled,
-                'trading_enabled': self.trading_enabled,
-                'timestamp': datetime.now().isoformat()
-            }
-            self.redis_client.setex("systemx:config", 300, json.dumps(config_data))
+            # Strategy performance and pattern analysis as JSON
+            pipe.setex("systemx:strategy_performance", 300, json.dumps(self.strategy_performance))
+            pipe.setex("systemx:pattern_analysis", 300, json.dumps(self.pattern_analysis))
             
-            # Publish accounts status (3 accounts)
+            # Accounts status (keep as JSON for complex nested data)
             accounts_data = self.get_all_accounts_status()
-            self.redis_client.setex("systemx:accounts", 300, json.dumps(accounts_data))
+            pipe.setex("systemx:accounts", 300, json.dumps(accounts_data))
+            
+            # Execute all Redis operations atomically
+            pipe.execute()
             
         except Exception as e:
             if self.debug:
@@ -3442,6 +3685,39 @@ class SystemX:
         except Exception as e:
             self.handle_backtesting_error("BACKTESTING_CYCLE_ERROR", e)
     
+    def _add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Adds a standard set of technical indicators to a DataFrame."""
+        if len(df) > 20:  # Minimum data points for meaningful indicators
+            # Simple moving averages
+            df['sma_10'] = df['close'].rolling(window=10).mean()
+            df['sma_20'] = df['close'].rolling(window=20).mean()
+            
+            # RSI (Relative Strength Index)
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df['rsi'] = 100 - (100 / (1 + rs))
+            
+            # Bollinger Bands
+            df['bb_middle'] = df['close'].rolling(window=20).mean()
+            bb_std = df['close'].rolling(window=20).std()
+            df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
+            df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
+            
+            # MACD (Moving Average Convergence Divergence)
+            exp1 = df['close'].ewm(span=12).mean()
+            exp2 = df['close'].ewm(span=26).mean()
+            df['macd'] = exp1 - exp2
+            df['macd_signal'] = df['macd'].ewm(span=9).mean()
+            
+            # Volume indicators (if volume data is available)
+            if 'volume' in df.columns:
+                df['volume_sma'] = df['volume'].rolling(window=20).mean()
+                df['volume_ratio'] = df['volume'] / df['volume_sma']
+        
+        return df
+
     def get_polygon_historical_data(self, ticker: str, days_back: int = 30) -> Optional[pd.DataFrame]:
         """Get comprehensive historical data from Polygon (5yr access)"""
         try:
@@ -3483,34 +3759,8 @@ class SystemX:
             df = pd.DataFrame(data)
             df.set_index('timestamp', inplace=True)
             
-            # Add technical indicators
-            if len(df) > 20:  # Minimum for indicators
-                # Simple moving averages
-                df['sma_10'] = df['close'].rolling(window=10).mean()
-                df['sma_20'] = df['close'].rolling(window=20).mean()
-                
-                # RSI
-                delta = df['close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs = gain / loss
-                df['rsi'] = 100 - (100 / (1 + rs))
-                
-                # Bollinger Bands
-                df['bb_middle'] = df['close'].rolling(window=20).mean()
-                bb_std = df['close'].rolling(window=20).std()
-                df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
-                df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
-                
-                # MACD
-                exp1 = df['close'].ewm(span=12).mean()
-                exp2 = df['close'].ewm(span=26).mean()
-                df['macd'] = exp1 - exp2
-                df['macd_signal'] = df['macd'].ewm(span=9).mean()
-                
-                # Volume indicators
-                df['volume_sma'] = df['volume'].rolling(window=20).mean()
-                df['volume_ratio'] = df['volume'] / df['volume_sma']
+            # Add technical indicators using helper method
+            df = self._add_technical_indicators(df)
             
             return df
             
@@ -3558,33 +3808,8 @@ class SystemX:
                         data['timestamp'] = pd.to_datetime(data['timestamp'])
                         data.set_index('timestamp', inplace=True)
                         
-                        # Add basic technical indicators
-                        if len(data) > 20:
-                            data['sma_10'] = data['close'].rolling(window=10).mean()
-                            data['sma_20'] = data['close'].rolling(window=20).mean()
-                            
-                            # RSI
-                            delta = data['close'].diff()
-                            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                            rs = gain / loss
-                            data['rsi'] = 100 - (100 / (1 + rs))
-                            
-                            # Bollinger Bands
-                            data['bb_middle'] = data['close'].rolling(window=20).mean()
-                            bb_std = data['close'].rolling(window=20).std()
-                            data['bb_upper'] = data['bb_middle'] + (bb_std * 2)
-                            data['bb_lower'] = data['bb_middle'] - (bb_std * 2)
-                            
-                            # Simple MACD
-                            exp1 = data['close'].ewm(span=12).mean()
-                            exp2 = data['close'].ewm(span=26).mean()
-                            data['macd'] = exp1 - exp2
-                            data['macd_signal'] = data['macd'].ewm(span=9).mean()
-                            
-                            # Volume indicators
-                            data['volume_sma'] = data['volume'].rolling(window=20).mean()
-                            data['volume_ratio'] = data['volume'] / data['volume_sma']
+                        # Add technical indicators using helper method
+                        data = self._add_technical_indicators(data)
                         
                         return data
             
@@ -3635,34 +3860,8 @@ class SystemX:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df.set_index('timestamp', inplace=True)
             
-            # Add basic technical indicators
-            if len(df) > 20:
-                df['sma_10'] = df['close'].rolling(window=10).mean()
-                df['sma_20'] = df['close'].rolling(window=20).mean()
-                
-                # RSI
-                delta = df['close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs = gain / loss
-                df['rsi'] = 100 - (100 / (1 + rs))
-                
-                # Bollinger Bands
-                df['bb_middle'] = df['close'].rolling(window=20).mean()
-                bb_std = df['close'].rolling(window=20).std()
-                df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
-                df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
-                
-                # Simple MACD
-                exp1 = df['close'].ewm(span=12).mean()
-                exp2 = df['close'].ewm(span=26).mean()
-                df['macd'] = exp1 - exp2
-                df['macd_signal'] = df['macd'].ewm(span=9).mean()
-                
-                # Volume indicators
-                if 'volume' in df.columns:
-                    df['volume_sma'] = df['volume'].rolling(window=20).mean()
-                    df['volume_ratio'] = df['volume'] / df['volume_sma']
+            # Add technical indicators using helper method
+            df = self._add_technical_indicators(df)
             
             return df
             
@@ -4400,6 +4599,14 @@ class SystemX:
             # Get today's trading data
             today = datetime.now().date()
             
+            # Get current equity from primary account with fallback to total
+            try:
+                account = self.alpaca.get_account()
+                current_equity = float(account.equity)
+            except Exception as e:
+                self.logger.warning(f"Could not fetch primary account for daily report, using total. Error: {e}")
+                current_equity = self.get_total_account_equity()  # Fallback
+            
             # Account performance - use total across all accounts for proper multi-account baseline
             total_equity = self.get_total_account_equity()
             total_starting_balance = sum(self.starting_equity.values()) if self.starting_equity else 90000.0
@@ -4409,7 +4616,7 @@ class SystemX:
             # Position summary
             positions = self.get_current_positions()
             total_exposure = sum(pos['market_value'] for pos in positions.values())
-            exposure_pct = total_exposure / total_equity
+            exposure_pct = total_exposure / total_equity if total_equity > 0 else 0
             
             # Performance metrics
             trades_today = self.trade_count
@@ -4503,6 +4710,28 @@ class SystemX:
                     except Exception as e:
                         if self.debug:
                             print(f"⚠️ Cache clear error: {e}")
+                
+                # V9B data consistency monitoring every 30 minutes
+                if not hasattr(self, 'last_pipeline_check'):
+                    self.last_pipeline_check = current_time
+                
+                if (current_time - self.last_pipeline_check).total_seconds() >= 1800:  # 30 minutes
+                    try:
+                        pipeline_report = self.monitor_v9b_data_consistency()
+                        self.last_pipeline_check = current_time
+                        
+                        if self.debug or pipeline_report.get('pipeline_health') != 'HEALTHY':
+                            health_status = pipeline_report.get('pipeline_health', 'UNKNOWN')
+                            sessions = pipeline_report.get('completed_sessions_6h', 0)
+                            analyzed = pipeline_report.get('analyzed_stocks_count_6h', 0)
+                            print(f"🔍 V9B Pipeline: {health_status} | Sessions: {sessions} | Analyzed: {analyzed}")
+                            
+                            if pipeline_report.get('issues'):
+                                for issue in pipeline_report.get('issues', []):
+                                    print(f"   ⚠️ {issue}")
+                    except Exception as e:
+                        if self.debug:
+                            print(f"⚠️ Pipeline monitoring error: {e}")
                 
                 # Check if we should shut down due to errors or shutdown flag
                 if self.health_status == "SHUTDOWN" or self.shutdown_flag.is_set():
