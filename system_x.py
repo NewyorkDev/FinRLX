@@ -517,6 +517,28 @@ def rate_limit(calls_per_second=1):
         return wrapper
     return decorator
 
+def network_retry(max_attempts=3, base_delay=1.0):
+    """Simple retry decorator for network operations"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except (ConnectionError, TimeoutError, requests.RequestException) as e:
+                    last_exception = e
+                    if attempt < max_attempts - 1:
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                        time.sleep(delay)
+                    continue
+                except Exception as e:
+                    # Don't retry non-network errors
+                    raise e
+            raise last_exception
+        return wrapper
+    return decorator
+
 class CircuitBreaker:
     """Circuit breaker pattern for system protection"""
     def __init__(self, failure_threshold: int = 5, recovery_timeout: int = 300) -> None:
@@ -592,6 +614,9 @@ class SystemX:
         # Add lock for consecutive losses and errors
         self.consecutive_losses_lock = threading.Lock()
         self.consecutive_errors_lock = threading.Lock()
+        
+        # Add configuration lock for thread-safe config updates
+        self.config_lock = threading.Lock()
         
         # Setup logging system
         self.setup_logging()
@@ -782,8 +807,9 @@ class SystemX:
             self.logger.addHandler(console_handler)
             self.logger.setLevel(logging.INFO)
     
-    def load_environment(self) -> None:
-        """Load all environment variables"""
+    def load_environment(self) -> Dict[str, str]:
+        """Load environment variables and return as dict instead of global state mutation"""
+        env_vars = {}
         # Use environment variable or relative path
         env_file = os.getenv('ENV_FILE_PATH', os.path.join(SCRIPT_DIR, 'the_end', '.env'))
         if os.path.exists(env_file):
@@ -791,7 +817,10 @@ class SystemX:
                 for line in f:
                     if '=' in line and not line.startswith('#'):
                         key, value = line.strip().split('=', 1)
+                        env_vars[key] = value
+                        # Still set in os.environ for backward compatibility
                         os.environ[key] = value
+        return env_vars
         
         # Core credentials
         self.alpaca_key = os.getenv('ALPACA_PAPER_API_KEY_ID')
@@ -1388,6 +1417,7 @@ class SystemX:
             print(f"⚠️ Supabase integration warning: {e}")
             self.supabase_logging_enabled = False
     
+    @network_retry(max_attempts=3)
     def get_v9b_qualified_stocks(self) -> List[Dict]:
         """Get high-quality qualified stocks from V9B system with fallback detection"""
         try:
@@ -1503,6 +1533,7 @@ class SystemX:
             self.log_system_event("V9B_ERROR", f"Error getting qualified stocks: {e}")
             return []
     
+    @network_retry(max_attempts=3)
     def get_v9b_analysis(self, ticker: str) -> Dict:
         """Get comprehensive V9B analysis for a ticker"""
         try:
@@ -1972,6 +2003,7 @@ class SystemX:
             self.log_system_event("TRADE_EXECUTION_ERROR", f"Unexpected error for {action} {shares} {ticker}: {e}")
             return False
     
+    @network_retry(max_attempts=3)
     def get_current_positions(self, use_cache: bool = True) -> Dict:
         """Get current positions across all accounts with enhanced details and caching"""
         try:
@@ -3495,19 +3527,20 @@ class SystemX:
             }
     
     def apply_config_updates(self, updates: Dict):
-        """Apply configuration updates from Redis commands"""
+        """Apply configuration updates from Redis commands with thread safety"""
         try:
-            if 'stop_loss_pct' in updates:
-                self.stop_loss_pct = float(updates['stop_loss_pct'])
-            if 'take_profit_pct' in updates:
-                self.take_profit_pct = float(updates['take_profit_pct'])
-            if 'trading_enabled' in updates:
-                self.trading_enabled = bool(updates['trading_enabled'])
-            if 'max_position_size' in updates:
-                self.max_position_size = float(updates['max_position_size'])
-            
-            if self.debug:
-                print(f"🔧 Configuration updated: {updates}")
+            with self.config_lock:
+                if 'stop_loss_pct' in updates:
+                    self.stop_loss_pct = float(updates['stop_loss_pct'])
+                if 'take_profit_pct' in updates:
+                    self.take_profit_pct = float(updates['take_profit_pct'])
+                if 'trading_enabled' in updates:
+                    self.trading_enabled = bool(updates['trading_enabled'])
+                if 'max_position_size' in updates:
+                    self.max_position_size = float(updates['max_position_size'])
+                
+                if self.debug:
+                    print(f"🔧 Configuration updated: {updates}")
                 
         except Exception as e:
             if self.debug:
@@ -3888,8 +3921,9 @@ class SystemX:
         
         return df
 
+    @lru_cache(maxsize=32)
     def get_polygon_historical_data(self, ticker: str, days_back: int = 30) -> Optional[pd.DataFrame]:
-        """Get comprehensive historical data from Polygon (5yr access)"""
+        """Get comprehensive historical data from Polygon (5yr access) with caching"""
         try:
             # Check if Polygon is available
             if not self.polygon_available:
@@ -3927,6 +3961,10 @@ class SystemX:
             df = pd.DataFrame(data)
             df.set_index('timestamp', inplace=True)
             
+            # Optimize memory usage with float32
+            numeric_columns = df.select_dtypes(include=['float64', 'int64']).columns
+            df[numeric_columns] = df[numeric_columns].astype(np.float32)
+            
             # Add technical indicators using helper method
             df = self._add_technical_indicators(df)
             
@@ -3936,8 +3974,9 @@ class SystemX:
             print(f"❌ Polygon data error for {ticker}: {e}")
             return None
     
+    @lru_cache(maxsize=32)
     def get_alpaca_historical_data(self, ticker: str, days_back: int = 30) -> Optional[pd.DataFrame]:
-        """Fallback method to get historical data from Alpaca"""
+        """Fallback method to get historical data from Alpaca with caching"""
         try:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back + 10)  # Buffer for weekends
@@ -4023,6 +4062,10 @@ class SystemX:
             df = pd.DataFrame(data)
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df.set_index('timestamp', inplace=True)
+            
+            # Optimize memory usage with float32
+            numeric_columns = df.select_dtypes(include=['float64', 'int64']).columns
+            df[numeric_columns] = df[numeric_columns].astype(np.float32)
             
             # Add technical indicators using helper method
             df = self._add_technical_indicators(df)
