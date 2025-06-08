@@ -697,7 +697,8 @@ class SystemX:
         self.logger.info("=" * 80)
         
         try:
-            self.load_environment()
+            env_vars = self.load_environment()
+            self.setup_credentials(env_vars)
             self.setup_trading_parameters()  # Set defaults first
             self.load_config()  # Then load configuration overrides
             self.setup_connections()
@@ -821,7 +822,9 @@ class SystemX:
                         # Still set in os.environ for backward compatibility
                         os.environ[key] = value
         return env_vars
-        
+    
+    def setup_credentials(self, env_vars: Dict[str, str] = None) -> None:
+        """Setup credentials from environment variables"""
         # Core credentials
         self.alpaca_key = os.getenv('ALPACA_PAPER_API_KEY_ID')
         self.alpaca_secret = os.getenv('ALPACA_PAPER_API_SECRET_KEY') 
