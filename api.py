@@ -33,7 +33,12 @@ import uvicorn
 
 # Load environment variables
 from dotenv import load_dotenv
-load_dotenv('/Users/francisclase/FinRLX/the_end/.env')
+import os
+
+# Use environment variable or relative path
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+env_path = os.getenv('ENV_FILE_PATH', os.path.join(SCRIPT_DIR, 'the_end', '.env'))
+load_dotenv(env_path)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

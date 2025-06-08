@@ -55,3 +55,19 @@ wrds
 
 # market data & paper trading API
 yfinance
+
+# System X Critical Dependencies
+supabase>=2.0.0
+polygon-api-client>=1.10.0
+redis>=5.0.0
+cryptography>=41.0.0
+keyring>=24.0.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+PyYAML>=6.0
+tenacity>=8.2.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+jinja2>=3.1.0
+websockets>=12.0
+requests>=2.31.0
