@@ -80,17 +80,86 @@ print("All Python dependencies satisfied")
 PY
 }
 
-# Backend reachability with timeout and retry ------------------------------------
+# Backend reachability with Upstash Redis support -------------------------------
 check_backend() { 
     info "Checking Redis connectivity..."
-    if command -v nc &>/dev/null; then
-        if nc -z -w3 "$REDIS_HOST" "$REDIS_PORT" 2>/dev/null; then
-            status "Redis reachable at $REDIS_HOST:$REDIS_PORT"
+    
+    # Load Redis configuration from environment file
+    if [[ -f "$ENV_FILE" ]]; then
+        # Extract Redis config from .env file
+        local redis_host_from_env=$(grep "^REDIS_HOST=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- || echo "")
+        local redis_port_from_env=$(grep "^REDIS_PORT=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- || echo "")
+        local redis_ssl_from_env=$(grep "^REDIS_SSL=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- || echo "")
+        
+        # Use environment file values if available
+        if [[ -n "$redis_host_from_env" ]]; then
+            REDIS_HOST="$redis_host_from_env"
+        fi
+        if [[ -n "$redis_port_from_env" ]]; then
+            REDIS_PORT="$redis_port_from_env"
+        fi
+        
+        # Check if using Upstash (SSL required)
+        if [[ "$redis_ssl_from_env" == "true" || "$REDIS_HOST" == *"upstash.io"* ]]; then
+            info "Detected Upstash Redis configuration - using Python test instead of nc"
+            # Use Python to test Upstash Redis with SSL
+            if "$PY" - <<PY 2>/dev/null
+import sys, os
+sys.path.insert(0, '.')
+
+# Load environment
+env_file = '$ENV_FILE'
+if os.path.exists(env_file):
+    with open(env_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and '=' in line and not line.startswith('#'):
+                key, value = line.split('=', 1)
+                os.environ[key] = value
+
+try:
+    import redis
+    redis_config = {
+        'host': os.getenv('REDIS_HOST', 'localhost'),
+        'port': int(os.getenv('REDIS_PORT', 6379)),
+        'decode_responses': True,
+        'socket_timeout': 5,
+        'socket_connect_timeout': 5
+    }
+    
+    if os.getenv('REDIS_PASSWORD'):
+        redis_config['password'] = os.getenv('REDIS_PASSWORD')
+    
+    if os.getenv('REDIS_SSL', 'false').lower() == 'true':
+        redis_config['ssl'] = True
+        redis_config['ssl_cert_reqs'] = None
+    
+    r = redis.Redis(**redis_config)
+    r.ping()
+    print("SUCCESS")
+except Exception as e:
+    print(f"ERROR: {e}")
+    sys.exit(1)
+PY
+            then
+                status "Upstash Redis connection successful"
+            else
+                warn "Upstash Redis connection failed (system will attempt to continue)"
+            fi
         else
-            warn "Redis unreachable at $REDIS_HOST:$REDIS_PORT (system will attempt to continue)"
+            # Standard Redis check with netcat
+            if command -v nc &>/dev/null; then
+                if nc -z -w3 "$REDIS_HOST" "$REDIS_PORT" 2>/dev/null; then
+                    status "Redis reachable at $REDIS_HOST:$REDIS_PORT"
+                else
+                    warn "Redis unreachable at $REDIS_HOST:$REDIS_PORT (system will attempt to continue)"
+                fi
+            else
+                warn "netcat (nc) not available - skipping Redis connectivity check"
+            fi
         fi
     else
-        warn "netcat (nc) not available - skipping Redis connectivity check"
+        warn "Environment file not found - skipping Redis connectivity check"
     fi
 }
 

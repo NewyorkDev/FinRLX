@@ -1469,8 +1469,8 @@ class SystemX:
                     
                     with self.supabase_lock:
                         fallback_response = self.supabase.table('v9_multi_source_analysis').select(
-                            'ticker, v9_combined_score, squeeze_confidence_score, claude_analysis, analysis_timestamp'
-                        ).gte('analysis_timestamp', cutoff_time).gte('v9_combined_score', 7.0).order('v9_combined_score', desc=True).limit(15).execute()
+                            'ticker, v9_combined_score, squeeze_confidence_score, claude_analysis, created_at, dts_score, trend_confidence_score'
+                        ).gte('created_at', cutoff_time).not_.is_('dts_score', 'null').order('dts_score', desc=True).limit(15).execute()
                     
                     if fallback_response.data:
                         existing_tickers = {stock['ticker'] for stock in qualified_stocks}
@@ -1478,25 +1478,49 @@ class SystemX:
                         
                         for stock in fallback_response.data:
                             ticker = stock.get('ticker', '')
+                            # Check if data is fresh (within last 4 hours)
+                            last_updated = stock.get('created_at', '')
+                            if last_updated:
+                                from datetime import datetime, timedelta
+                                try:
+                                    update_time = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                                    cutoff_time = datetime.now().replace(tzinfo=update_time.tzinfo) - timedelta(hours=4)
+                                    is_fresh = update_time >= cutoff_time
+                                except:
+                                    is_fresh = False
+                            else:
+                                is_fresh = False
+                            
                             if (ticker and 
                                 ticker not in existing_tickers and
                                 not ticker.startswith('TEST') and 
                                 len(ticker) <= 5 and 
                                 ticker.isalpha() and
-                                stock.get('v9_combined_score', 0) >= 7.0):
+                                stock.get('dts_score') is not None and 
+                                stock.get('dts_score', 0) >= 60 and
+                                is_fresh):
                                 
-                                # Convert V9B score to estimated DTS score for consistency
-                                estimated_dts = min(75, max(60, stock.get('v9_combined_score', 0) * 8))
+                                # Use actual DTS score from the table, or estimate if None
+                                actual_dts = stock.get('dts_score')
+                                if actual_dts is not None and actual_dts > 0:
+                                    dts_score = actual_dts
+                                else:
+                                    # Fallback to estimated DTS score for consistency
+                                    dts_score = min(75, max(60, stock.get('v9_combined_score', 0) * 75))
+                                
+                                # Fix V9B score scaling - convert fractional to percentage scale
+                                raw_v9b = stock.get('v9_combined_score', 0)
+                                v9b_confidence = raw_v9b * 100 if raw_v9b < 10 else raw_v9b
                                 
                                 qualified_stocks.append({
                                     'ticker': ticker,
-                                    'dts_score': estimated_dts,
+                                    'dts_score': dts_score,
                                     'squeeze_score': stock.get('squeeze_confidence_score', 0),
-                                    'trend_score': 0,  # Not available in v9_multi_source_analysis
+                                    'trend_score': stock.get('trend_confidence_score', 0),  # Now available
                                     'position_size': 0.1,  # Default position size
-                                    'v9b_confidence': stock.get('v9_combined_score', 0),
+                                    'v9b_confidence': v9b_confidence,
                                     'claude_analysis': stock.get('claude_analysis', ''),
-                                    'last_updated': stock.get('analysis_timestamp', datetime.now().isoformat()),
+                                    'last_updated': stock.get('created_at', datetime.now().isoformat()),
                                     'source': 'v9_multi_source_analysis_fallback'
                                 })
                                 fallback_count += 1
@@ -1542,15 +1566,21 @@ class SystemX:
         try:
             with self.supabase_lock:
                 response = self.supabase.table('v9_multi_source_analysis').select(
-                    'ticker, squeeze_confidence_score, trend_confidence_score, v9_combined_score, claude_analysis, technical_data'
+                    'ticker, squeeze_confidence_score, trend_confidence_score, v9_combined_score, claude_analysis, technical_data, dts_score'
                 ).eq('ticker', ticker).order('created_at', desc=True).limit(1).execute()
             
             if response.data:
                 analysis = response.data[0]
+                
+                # Fix V9B score scaling - convert fractional to percentage scale
+                raw_v9b = self._safe_float(analysis.get('v9_combined_score'), 0)
+                combined_score = raw_v9b * 100 if raw_v9b < 10 else raw_v9b
+                
                 return {
                     'squeeze_confidence': self._safe_float(analysis.get('squeeze_confidence_score'), 0),
                     'trend_confidence': self._safe_float(analysis.get('trend_confidence_score'), 0), 
-                    'combined_score': self._safe_float(analysis.get('v9_combined_score'), 0),
+                    'combined_score': combined_score,
+                    'dts_score': self._safe_float(analysis.get('dts_score'), 0),
                     'claude_analysis': str(analysis.get('claude_analysis', '')),
                     'technical_data': analysis.get('technical_data', {}) or {}
                 }
@@ -1582,7 +1612,7 @@ class SystemX:
                 # Count records in v9_multi_source_analysis table (fallback source)
                 multi_source_response = self.supabase.table('v9_multi_source_analysis').select(
                     'ticker', count='exact'
-                ).gte('analysis_timestamp', cutoff_time).execute()
+                ).gte('created_at', cutoff_time).execute()
             
             completed_sessions = len(sessions_response.data) if sessions_response.data else 0
             analyzed_stocks_count = analyzed_stocks_response.count or 0
@@ -1811,33 +1841,33 @@ class SystemX:
                 # Strong buy signal (enhanced with ML)
                 if dts_score >= 75 and v9b_confidence >= 9.0 and ml_signal >= 0.7:
                     confidence_multiplier = min(v9b_confidence / 10.0 * ml_signal, 1.5)
-                    shares = self.calculate_position_size(ticker, current_price, confidence_multiplier)
+                    shares = self.calculate_position_size(ticker, current_price, confidence_multiplier, account_name)
                     
                     if shares > 0:
                         reason = f"STRONG_BUY_ML (DTS:{dts_score:.1f}, V9B:{v9b_confidence:.1f}, ML:{ml_signal:.2f})"
-                        if self.execute_trade(ticker, shares, 'buy', current_price, reason):
+                        if self.execute_trade(ticker, shares, 'buy', current_price, reason, account_name):
                             self.update_strategy_performance('ML_ENHANCED', 0)  # Will be updated on exit
                             return True
                 
                 # Moderate buy signal with ML confirmation
                 elif dts_score >= 70 and v9b_confidence >= 8.0 and ml_signal >= 0.6:
                     confidence_multiplier = 0.8 * ml_signal
-                    shares = self.calculate_position_size(ticker, current_price, confidence_multiplier)
+                    shares = self.calculate_position_size(ticker, current_price, confidence_multiplier, account_name)
                     
                     if shares > 0:
                         reason = f"MODERATE_BUY_ML (DTS:{dts_score:.1f}, V9B:{v9b_confidence:.1f}, ML:{ml_signal:.2f})"
-                        if self.execute_trade(ticker, shares, 'buy', current_price, reason):
+                        if self.execute_trade(ticker, shares, 'buy', current_price, reason, account_name):
                             self.update_strategy_performance('ML_ENHANCED', 0)  # Will be updated on exit
                             return True
                 
                 # ML-only signal for high-confidence predictions
                 elif ml_signal >= 0.8 and dts_score >= 65:
                     confidence_multiplier = 0.6 * ml_signal
-                    shares = self.calculate_position_size(ticker, current_price, confidence_multiplier)
+                    shares = self.calculate_position_size(ticker, current_price, confidence_multiplier, account_name)
                     
                     if shares > 0:
                         reason = f"ML_SIGNAL (DTS:{dts_score:.1f}, ML:{ml_signal:.2f})"
-                        if self.execute_trade(ticker, shares, 'buy', current_price, reason):
+                        if self.execute_trade(ticker, shares, 'buy', current_price, reason, account_name):
                             self.update_strategy_performance('ML_ENHANCED', 0)  # Will be updated on exit
                             return True
             
@@ -1862,7 +1892,7 @@ class SystemX:
                     sell_reason = f"TAKE_PROFIT ({current_position.get('unrealized_pl_pct', 0):.1f}%)"
                 
                 if should_sell:
-                    if self.execute_trade(ticker, current_qty, 'sell', current_price, sell_reason):
+                    if self.execute_trade(ticker, current_qty, 'sell', current_price, sell_reason, account_name):
                         # Calculate trade return for strategy tracking
                         trade_return = current_position.get('unrealized_pl_pct', 0) / 100
                         self.update_strategy_performance('ML_ENHANCED', trade_return)
@@ -2124,22 +2154,36 @@ class SystemX:
                 print(f"⚠️ Price fetch attempt failed for {ticker}: {e}")
             raise
     
-    def calculate_position_size(self, ticker: str, price: float, confidence_multiplier: float = 1.0) -> int:
+    def calculate_position_size(self, ticker: str, price: float, confidence_multiplier: float = 1.0, account_name: str = "PRIMARY_30K") -> int:
         """Calculate position size using Kelly Criterion with fallback to basic sizing"""
         if not price:
             return 0
         
         try:
+            # Check if this is a "sure thing" stock for aggressive accounts 1&2
+            is_sure_thing = self.is_sure_thing_stock(ticker)
+            
             # Try Kelly Criterion first
             if hasattr(self, 'kelly_enabled') and self.kelly_enabled:
-                kelly_size = self.calculate_position_size_kelly(ticker, price, confidence_multiplier)
+                kelly_size = self.calculate_position_size_kelly(ticker, price, confidence_multiplier, account_name, is_sure_thing)
                 if kelly_size > 0:
                     return kelly_size
             
             # Fallback to basic position sizing (thread-safe account balance access)
             with self.account_balance_lock:
                 account_balance = self.account_balance
-            base_size = account_balance * self.max_position_size * confidence_multiplier
+            
+            # Determine max position size based on account and stock confidence
+            if is_sure_thing and account_name in ["PRIMARY_30K", "SECONDARY_30K"]:
+                # Aggressive 50% position sizing for "sure thing" stocks on accounts 1&2
+                max_position = 0.50
+                if self.debug:
+                    print(f"🎯 AGGRESSIVE SIZING: {ticker} is a sure thing on {account_name}, using 50% max position")
+            else:
+                # Standard position sizing for other cases
+                max_position = self.max_position_size
+            
+            base_size = account_balance * max_position * confidence_multiplier
             
             # Check available cash
             account = self.alpaca.get_account()
@@ -2157,7 +2201,29 @@ class SystemX:
             self.log_system_event("POSITION_SIZE_ERROR", f"Error calculating position size for {ticker}: {e}")
             return 0
     
-    def calculate_position_size_kelly(self, ticker: str, price: float, confidence_multiplier: float = 1.0) -> int:
+    def is_sure_thing_stock(self, ticker: str) -> bool:
+        """Identify 'sure thing' stocks with high DTS + high V9B scores"""
+        try:
+            # Get V9B analysis for the ticker
+            analysis = self.get_v9b_analysis(ticker)
+            
+            dts_score = analysis.get('dts_score', 0)
+            v9b_confidence = analysis.get('combined_score', 0)
+            
+            # "Sure thing" criteria: DTS >= 78 AND V9B >= 8.8 (slightly more conservative than strong buy)
+            is_sure_thing = dts_score >= 78 and v9b_confidence >= 8.8
+            
+            if self.debug and is_sure_thing:
+                print(f"🎯 SURE THING DETECTED: {ticker} - DTS: {dts_score:.1f}, V9B: {v9b_confidence:.1f}")
+            
+            return is_sure_thing
+            
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Error checking sure thing status for {ticker}: {e}")
+            return False
+
+    def calculate_position_size_kelly(self, ticker: str, price: float, confidence_multiplier: float = 1.0, account_name: str = "PRIMARY_30K", is_sure_thing: bool = False) -> int:
         """Calculate optimal position size using Kelly Criterion with proper safeguards"""
         try:
             # Get historical performance data for this ticker
@@ -2219,14 +2285,24 @@ class SystemX:
                             print(f"📊 Kelly: Calculation error for {ticker}: {calc_error}, using minimal allocation")
             
             # Apply safety caps - Kelly can suggest very high allocations
-            kelly_fraction = max(0, min(kelly_fraction, 0.25))  # Cap at 25%
+            # Allow higher caps for "sure thing" stocks on aggressive accounts
+            if is_sure_thing and account_name in ["PRIMARY_30K", "SECONDARY_30K"]:
+                kelly_cap = 0.50  # 50% cap for sure things on accounts 1&2
+                max_position_override = 0.50  # Override max position size
+                if self.debug:
+                    print(f"📊 Kelly: Aggressive cap (50%) applied for sure thing {ticker} on {account_name}")
+            else:
+                kelly_cap = 0.25  # Standard 25% cap
+                max_position_override = self.max_position_size  # Use standard max position
+            
+            kelly_fraction = max(0, min(kelly_fraction, kelly_cap))
             
             # Combine constraints: take the minimum of all limits
             # This ensures we respect ALL constraints simultaneously
             final_constraints = [
                 kelly_fraction,
                 self.max_total_exposure,
-                self.max_position_size
+                max_position_override
             ]
             
             # Remove None values and get the most restrictive constraint
@@ -2267,25 +2343,33 @@ class SystemX:
             shares = int(position_value / price) if price > 0 else 0
             
             # Final sanity check: position shouldn't exceed reasonable limits
-            max_reasonable_position = available_cash * 0.3  # Never more than 30% in one position
+            # Allow higher caps for "sure thing" stocks on aggressive accounts
+            if is_sure_thing and account_name in ["PRIMARY_30K", "SECONDARY_30K"]:
+                max_reasonable_position = available_cash * 0.50  # 50% for sure things on accounts 1&2
+                cap_description = "50% cash (sure thing)"
+            else:
+                max_reasonable_position = available_cash * 0.30  # Standard 30% cap
+                cap_description = "30% cash (standard)"
+            
             final_capped = False
             if shares * price > max_reasonable_position:
                 shares = int(max_reasonable_position / price)
                 final_capped = True
                 if self.debug:
-                    print(f"📊 Kelly: Position capped at 30% of cash for safety")
+                    print(f"📊 Kelly: Position capped at {cap_description} for safety")
             
             # Calculate the true final fraction that was actually used
             actual_position_value = shares * price if shares > 0 else 0
             true_final_fraction = (actual_position_value / total_equity) if total_equity > 0 else 0
             
             if self.debug:
-                print(f"📊 Kelly Criterion for {ticker}: ")
+                print(f"📊 Kelly Criterion for {ticker} on {account_name}: ")
                 print(f"   Win Rate: {win_rate:.1%}, Avg Win: {avg_win:.1%}, Avg Loss: {avg_loss:.1%}")
                 print(f"   Raw Kelly: {kelly_fraction:.3f}, Constrained: {adjusted_fraction:.3f}, Actual Used: {true_final_fraction:.3f}")
                 print(f"   Position: {shares} shares (${actual_position_value:,.0f} / ${position_value:,.0f} target)")
-                print(f"   Final Cap Applied: {'YES (30% cash)' if final_capped else 'NO'}")
-                print(f"   Constraints: kelly={kelly_fraction:.3f}, max_pos={self.max_position_size:.1%}, max_exp={self.max_total_exposure:.1%}")
+                print(f"   Final Cap Applied: {'YES (' + cap_description + ')' if final_capped else 'NO'}")
+                print(f"   Sure Thing: {'YES' if is_sure_thing else 'NO'}, Kelly Cap: {kelly_cap:.1%}, Max Position: {max_position_override:.1%}")
+                print(f"   Constraints: kelly={kelly_fraction:.3f}, max_pos={max_position_override:.1%}, max_exp={self.max_total_exposure:.1%}")
                 print(f"   Account: ${available_cash:,.0f} cash, ${total_equity:,.0f} equity")
             
             return max(0, shares)
@@ -3320,7 +3404,7 @@ class SystemX:
                         # Check for analysis requests
                         self.check_analysis_requests()
                         
-                    time.sleep(30)  # Publish every 30 seconds
+                    time.sleep(300)  # Publish every 5 minutes (was 30s) - Reduces Redis usage by 90%
                     
                 except Exception as e:
                     if self.debug:
@@ -3332,97 +3416,94 @@ class SystemX:
         metrics_thread.start()
         
         if self.debug:
-            print("📊 Metrics publishing started (30s intervals)")
+            print("📊 Metrics publishing started (5min intervals - Redis optimized)")
     
     def publish_all_metrics(self):
-        """Publish all system metrics to Redis using efficient HASH data types"""
+        """Publish all system metrics to Redis using optimized operations for Upstash 500k limit"""
         try:
             # Skip if Redis is not connected
             if not getattr(self, 'redis_connected', False):
                 return
                 
             current_time = datetime.now().isoformat()
-            positions = self.get_current_positions()
-            trading_signals = self.get_current_signals()
             
-            # Use Redis pipeline for atomic operations
+            # Use Redis pipeline for atomic operations (single execute() = 1 command)
             pipe = self.redis_client.pipeline()
             
-            # Core system metrics using HASH
-            pipe.hset("systemx:core", mapping={
+            # OPTIMIZATION 1: Consolidate all metrics into single hash to reduce commands
+            # Instead of 5 separate hset operations, use 1 large hash
+            all_metrics = {
+                # Core metrics
                 'timestamp': current_time,
                 'session_id': self.session_id,
                 'account_balance': str(self.account_balance),
-                'daily_pnl': '0',  # Calculate actual daily P&L
                 'daily_pnl_pct': '0',
                 'market_open': str(self.is_market_open()),
                 'health_status': self.health_status,
-                'trading_enabled': str(self.trading_enabled)
-            })
-            pipe.expire("systemx:core", 120)
-            
-            # Performance metrics using HASH
-            pipe.hset("systemx:performance", mapping={
-                'timestamp': current_time,
+                'trading_enabled': str(self.trading_enabled),
+                
+                # Performance metrics
                 'sharpe_ratio': str(self.sharpe_ratio),
                 'sortino_ratio': str(self.sortino_ratio),
                 'max_drawdown': str(self.max_drawdown),
                 'var_95': str(self.var_95),
-                'risk_adjustment': str(self.risk_adjustment_factor)
-            })
-            pipe.expire("systemx:performance", 120)
-            
-            # Trading metrics using HASH
-            pipe.hset("systemx:trading", mapping={
-                'timestamp': current_time,
+                'risk_adjustment': str(self.risk_adjustment_factor),
+                
+                # Trading metrics  
                 'trades_today': str(self.trade_count),
-                'position_count': str(len(positions)),
                 'current_exposure': str(self.calculate_current_exposure()),
-                'trading_enabled': str(self.trading_enabled)
-            })
-            pipe.expire("systemx:trading", 120)
-            
-            # ML model metrics using HASH
-            pipe.hset("systemx:ml_model", mapping={
-                'timestamp': current_time,
-                'available': str(ML_AVAILABLE and self.ml_model is not None),
-                'feature_importance': json.dumps(self.feature_importance) if self.feature_importance else '{}'
-            })
-            pipe.expire("systemx:ml_model", 120)
-            
-            # Configuration using HASH for granular access
-            pipe.hset("systemx:config", mapping={
-                'timestamp': current_time,
+                
+                # ML metrics
+                'ml_available': str(ML_AVAILABLE and self.ml_model is not None),
+                
+                # Configuration
                 'max_position_size': str(self.max_position_size),
-                'max_total_exposure': str(self.max_total_exposure),
                 'stop_loss_pct': str(self.stop_loss_pct),
                 'take_profit_pct': str(self.take_profit_pct),
-                'kelly_enabled': str(self.kelly_enabled),
-                'trading_enabled': str(self.trading_enabled)
-            })
-            pipe.expire("systemx:config", 300)
+                'kelly_enabled': str(self.kelly_enabled)
+            }
             
-            # Health data as JSON (complex nested structure)
-            health_data = self.perform_health_check()
-            pipe.setex("systemx:health", 120, json.dumps(health_data))
+            # Single hset command instead of 5 separate ones (saves 4 commands per cycle)
+            pipe.hset("systemx:consolidated", mapping=all_metrics)
+            pipe.expire("systemx:consolidated", 600)  # 10 minutes expiry
             
-            # Complex data structures as JSON (positions, signals, stocks)
-            pipe.setex("systemx:positions", 120, json.dumps(positions))
-            pipe.setex("systemx:trading_signals", 120, json.dumps(trading_signals))
+            # OPTIMIZATION 2: Only publish expensive data every 3rd cycle (every 15 minutes)
+            if not hasattr(self, '_metrics_cycle_count'):
+                self._metrics_cycle_count = 0
+            self._metrics_cycle_count += 1
             
-            qualified_stocks = self.get_v9b_qualified_stocks()
-            pipe.setex("systemx:qualified_stocks", 300, json.dumps(qualified_stocks))
+            # Publish heavy data only every 3rd cycle (reduces expensive calls by 66%)
+            if self._metrics_cycle_count % 3 == 0:
+                # These are expensive operations - only do every 15 minutes
+                positions = self.get_current_positions()
+                trading_signals = self.get_current_signals()
+                qualified_stocks = self.get_v9b_qualified_stocks()
+                accounts_data = self.get_all_accounts_status()
+                
+                # Consolidated JSON data (4 commands instead of individual ones)
+                pipe.setex("systemx:positions", 600, json.dumps(positions))
+                pipe.setex("systemx:trading_signals", 600, json.dumps(trading_signals))
+                pipe.setex("systemx:qualified_stocks", 900, json.dumps(qualified_stocks))  # 15 min expiry
+                pipe.setex("systemx:accounts", 900, json.dumps(accounts_data))
+                
+                # Health check only every 15 minutes
+                health_data = self.perform_health_check()
+                pipe.setex("systemx:health", 600, json.dumps(health_data))
             
-            # Strategy performance and pattern analysis as JSON
-            pipe.setex("systemx:strategy_performance", 300, json.dumps(self.strategy_performance))
-            pipe.setex("systemx:pattern_analysis", 300, json.dumps(self.pattern_analysis))
+            # OPTIMIZATION 3: Static data even less frequently (every 6th cycle = 30 minutes)
+            if self._metrics_cycle_count % 6 == 0:
+                # Very static data - only every 30 minutes
+                pipe.setex("systemx:strategy_performance", 1800, json.dumps(self.strategy_performance))
+                pipe.setex("systemx:pattern_analysis", 1800, json.dumps(self.pattern_analysis))
+                if self.feature_importance:
+                    pipe.setex("systemx:feature_importance", 1800, json.dumps(self.feature_importance))
             
-            # Accounts status (keep as JSON for complex nested data)
-            accounts_data = self.get_all_accounts_status()
-            pipe.setex("systemx:accounts", 300, json.dumps(accounts_data))
-            
-            # Execute all Redis operations atomically
+            # Execute all Redis operations atomically (1 command total)
             pipe.execute()
+            
+            # OPTIMIZATION 4: Reset cycle counter to prevent overflow
+            if self._metrics_cycle_count >= 18:  # Reset every 90 minutes
+                self._metrics_cycle_count = 0
             
         except Exception as e:
             if self.debug:
@@ -3431,14 +3512,26 @@ class SystemX:
             self.redis_connected = False
     
     def check_analysis_requests(self):
-        """Check for stock analysis requests from API"""
+        """Check for stock analysis requests from API - Redis optimized"""
         try:
-            # Check for analysis requests
-            keys = self.redis_client.keys("systemx:analysis_request:*")
-            for key in keys:
-                try:
-                    request_data = self.redis_client.get(key)
-                    if request_data:
+            # OPTIMIZATION: Use a known request queue instead of expensive keys() scan
+            # Check for pending requests in a dedicated list (more efficient than keys() pattern matching)
+            request_queue_key = "systemx:analysis_requests"
+            
+            # Only process if there are pending requests (check length first - 1 command)
+            queue_length = self.redis_client.llen(request_queue_key)
+            if queue_length == 0:
+                return
+                
+            # Process up to 3 requests per cycle to avoid overwhelming (OPTIMIZATION)
+            max_requests = min(3, queue_length)
+            pipe = self.redis_client.pipeline()
+            
+            for _ in range(max_requests):
+                # Pop request from queue (atomic operation)
+                request_data = self.redis_client.lpop(request_queue_key)
+                if request_data:
+                    try:
                         request = json.loads(request_data)
                         ticker = request.get('ticker')
                         
@@ -3446,18 +3539,17 @@ class SystemX:
                             # Perform analysis
                             analysis = self.perform_stock_analysis(ticker)
                             
-                            # Store response
+                            # Store response using pipeline
                             response_key = f"systemx:analysis_response:{ticker}"
-                            self.redis_client.setex(response_key, 60, json.dumps(analysis))
+                            pipe.setex(response_key, 120, json.dumps(analysis))  # 2 min expiry
                             
-                            # Remove request
-                            self.redis_client.delete(key)
-                            
-                except Exception as e:
-                    if self.debug:
-                        print(f"⚠️ Analysis request processing error: {e}")
-                    # Remove bad request
-                    self.redis_client.delete(key)
+                    except Exception as e:
+                        if self.debug:
+                            print(f"⚠️ Analysis request processing error: {e}")
+            
+            # Execute all responses at once
+            if pipe.command_stack:
+                pipe.execute()
                     
         except Exception as e:
             if self.debug:
@@ -3845,18 +3937,130 @@ class SystemX:
         except Exception:
             return 0
     
+    def get_diverse_backtest_tickers(self, qualified_stocks: List[Dict]) -> List[str]:
+        """
+        Get diverse set of tickers for backtesting with rotation and freshness filtering
+        Addresses the issue of repeatedly getting the same 8 tech stocks (AAPL, MSFT, etc.)
+        """
+        try:
+            # Filter for fresh data (analyzed within last 6 hours)
+            cutoff_time = datetime.now() - timedelta(hours=6)
+            fresh_stocks = []
+            
+            for stock in qualified_stocks:
+                last_updated = stock.get('last_updated')
+                if last_updated:
+                    try:
+                        # Parse timestamp and check freshness
+                        updated_dt = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                        if updated_dt.replace(tzinfo=None) > cutoff_time:
+                            fresh_stocks.append(stock)
+                    except Exception:
+                        # If timestamp parsing fails, include stock anyway
+                        fresh_stocks.append(stock)
+                else:
+                    # No timestamp, include stock
+                    fresh_stocks.append(stock)
+            
+            # If we don't have enough fresh stocks, lower the DTS threshold
+            if len(fresh_stocks) < 8:
+                print(f"⚠️ Only {len(fresh_stocks)} fresh stocks, lowering DTS threshold...")
+                try:
+                    # Query with lower DTS threshold for more variety
+                    with self.supabase_lock:
+                        response = self.supabase.table('analyzed_stocks').select(
+                            'ticker, dts_score, dts_qualification, squeeze_score, trend_score'
+                        ).gte('dts_score', max(6.0, self.min_dts_score - 1.5)).order('dts_score', desc=True).limit(25).execute()
+                    
+                    if response.data:
+                        for stock in response.data:
+                            ticker = stock.get('ticker', '')
+                            if (ticker and 
+                                not ticker.startswith('TEST') and 
+                                len(ticker) <= 5 and 
+                                ticker.isalpha() and
+                                not any(fs['ticker'] == ticker for fs in fresh_stocks)):
+                                
+                                fresh_stocks.append({
+                                    'ticker': ticker,
+                                    'dts_score': stock.get('dts_score', 0),
+                                    'last_updated': datetime.now().isoformat(),
+                                    'source': 'lowered_threshold'
+                                })
+                                
+                                if len(fresh_stocks) >= 15:
+                                    break
+                except Exception as e:
+                    print(f"⚠️ Error getting stocks with lowered threshold: {e}")
+            
+            # Implement rotation logic using persistent counter
+            rotation_key = "systemx:backtest_rotation_index"
+            try:
+                current_rotation = int(self.redis_client.get(rotation_key) or 0)
+            except Exception:
+                current_rotation = 0
+            
+            # Create diverse selection avoiding the "big 8" tech stocks
+            big_tech = {'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX'}
+            
+            # Separate stocks into categories
+            non_tech_stocks = [s for s in fresh_stocks if s['ticker'] not in big_tech]
+            tech_stocks = [s for s in fresh_stocks if s['ticker'] in big_tech]
+            
+            # Build diverse ticker list
+            selected_tickers = []
+            
+            # Prioritize non-tech stocks but include some rotation
+            available_non_tech = non_tech_stocks[current_rotation:] + non_tech_stocks[:current_rotation]
+            selected_tickers.extend([s['ticker'] for s in available_non_tech[:6]])
+            
+            # Add some tech stocks but limit to 2-3 max
+            if len(selected_tickers) < 5:
+                tech_rotation = current_rotation % len(tech_stocks) if tech_stocks else 0
+                rotated_tech = tech_stocks[tech_rotation:] + tech_stocks[:tech_rotation]
+                remaining_slots = min(3, 8 - len(selected_tickers))
+                selected_tickers.extend([s['ticker'] for s in rotated_tech[:remaining_slots]])
+            
+            # Ensure we have enough tickers (fallback to top qualified)
+            if len(selected_tickers) < 5:
+                fallback_tickers = [s['ticker'] for s in fresh_stocks[:8] if s['ticker'] not in selected_tickers]
+                selected_tickers.extend(fallback_tickers[:8-len(selected_tickers)])
+            
+            # Update rotation index for next time - Redis optimized
+            try:
+                next_rotation = (current_rotation + 3) % max(len(fresh_stocks), 1)
+                self.redis_client.setex(rotation_key, 7200, str(next_rotation))  # Longer expiry (2 hours)
+            except Exception:
+                pass
+            
+            # Limit to 5-8 tickers for focused backtesting
+            final_tickers = selected_tickers[:5 + (current_rotation % 4)]  # 5-8 tickers
+            
+            if self.debug:
+                non_tech_count = len([t for t in final_tickers if t not in big_tech])
+                tech_count = len([t for t in final_tickers if t in big_tech])
+                print(f"🔄 Backtest tickers: {final_tickers} (non-tech: {non_tech_count}, tech: {tech_count}, rotation: {current_rotation})")
+            
+            return final_tickers
+            
+        except Exception as e:
+            print(f"⚠️ Error in get_diverse_backtest_tickers: {e}")
+            # Fallback to top 5 from original list
+            return [s['ticker'] for s in qualified_stocks[:5]]
+    
     def execute_backtesting_cycle(self):
         """Execute comprehensive backtesting when market is closed"""
         try:
             print(f"\n🧪 BACKTESTING CYCLE - {datetime.now().strftime('%H:%M:%S')}")
             
-            # Get qualified stocks for backtesting
+            # Get qualified stocks for backtesting with rotation
             qualified_stocks = self.get_v9b_qualified_stocks()
             if not qualified_stocks:
                 print("⚠️ No qualified stocks for backtesting")
                 return
             
-            ticker_list = [stock['ticker'] for stock in qualified_stocks[:5]]  # Top 5 for backtesting
+            # Add variety to backtesting by rotating through different stock sets
+            ticker_list = self.get_diverse_backtest_tickers(qualified_stocks)
             
             # Run multiple strategy backtests
             backtest_results = {}

@@ -44,6 +44,42 @@ module.exports = {
       out_file: '/Users/francisclase/FinRLX/logs/system-x-monitor-out.log',
       time: true,
       exec_mode: 'fork'
+    },
+    {
+      name: 'health-monitor',
+      script: '/opt/homebrew/bin/python3.12',
+      args: '/Users/francisclase/FinRLX/health_monitor.py --continuous',
+      cwd: '/Users/francisclase/FinRLX',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '500M',
+      env: {
+        NODE_ENV: 'production',
+        PYTHONPATH: '/Users/francisclase/FinRLX'
+      },
+      error_file: '/Users/francisclase/FinRLX/logs/health-monitor-error.log',
+      out_file: '/Users/francisclase/FinRLX/logs/health-monitor-out.log',
+      time: true,
+      exec_mode: 'fork'
+    },
+    {
+      name: 'dts-sync-bridge',
+      script: '/opt/homebrew/bin/python3.12',
+      args: '/Users/francisclase/FinRLX/dts_sync_bridge.py --continuous',
+      cwd: '/Users/francisclase/FinRLX',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '300M',
+      env: {
+        NODE_ENV: 'production',
+        PYTHONPATH: '/Users/francisclase/FinRLX'
+      },
+      error_file: '/Users/francisclase/FinRLX/logs/dts-sync-error.log',
+      out_file: '/Users/francisclase/FinRLX/logs/dts-sync-out.log',
+      time: true,
+      exec_mode: 'fork'
     }
   ],
 
