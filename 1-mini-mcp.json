@@ -282,6 +282,8 @@
       "column_names_verification": "✅ COLUMN NAMES AUDIT COMPLETE: Searched system_x.py for incorrect column names 'squeeze_momentum', 'v9_score', and 'trend_strength' - NO OCCURRENCES FOUND. System correctly uses 'squeeze_score', 'v9_combined_score', and 'trend_score' throughout all SQL queries and database operations. Database schema consistency verified across all Supabase table operations.",
       "dts_score_calculation_fix": "✅ DTS SCORE CALCULATION FIXED: Resolved None/NULL DTS score issue by fixing 3 critical problems: (1) Corrected timestamp field from 'analysis_timestamp' to 'created_at' in v9_multi_source_analysis queries, (2) Updated query to extract actual dts_score column from database instead of calculating estimated values, (3) Fixed qualification logic to prioritize stocks with real DTS scores >= 60 over v9_combined_score >= 7.0. Now properly extracts DTS scores like KNW: 77.0, KLTO: 71.0 with full squeeze/trend confidence scores.",
       "aggressive_position_sizing_implementation": "✅ AGGRESSIVE POSITION SIZING FOR SURE THINGS IMPLEMENTED: Added is_sure_thing_stock() method to detect high-confidence stocks (DTS ≥ 78 AND V9B ≥ 8.8), modified calculate_position_size() and calculate_position_size_kelly() to allow up to 50% position sizing for sure things on PRIMARY_30K and SECONDARY_30K accounts, enhanced Kelly Criterion caps from 25% to 50% for sure things, updated fallback position sizing logic, modified all execute_trade calls to pass account_name parameter, added comprehensive debug logging showing sure thing detection and aggressive sizing application - ACCOUNTS 1&2 NOW TRADE AGGRESSIVELY ON HIGH-CONFIDENCE STOCKS",
+      "account_performance_analysis": "🎯 CRITICAL POSITION SIZING DISCOVERY: Analysis revealed why TERTIARY_30K (Account 3) made money while PRIMARY_30K and SECONDARY_30K (Accounts 1&2) lost money on the same stocks. ROOT CAUSE: Accounts 1&2 use aggressive 50% position sizing for 'sure thing' stocks (lines 2276-2280, 2472-2476, 2577-2579), while Account 3 was excluded from aggressive sizing logic and uses standard 15% maximum position sizing. This created massive concentration risk for Accounts 1&2 - when 'sure thing' stocks failed, they lost heavily due to overconcentration. Account 3's conservative sizing provided natural risk control and better diversification, leading to profits. The system inadvertently created a perfect A/B test showing position sizing is more critical than stock selection for risk management.",
+      "account_specific_trading_differences": "🔍 COMPREHENSIVE ACCOUNT LOGIC ANALYSIS: Detailed analysis of system_x.py revealed 7 key account-specific differences beyond position sizing: (1) Day trading limits per account (3 max, lines 985-3018) with round-robin selection (lines 1300-1349), (2) TERTIARY_30K exclusion from 50% aggressive sizing for 'sure things' (only PRIMARY_30K/SECONDARY_30K get aggressive caps), (3) Individual account cash constraints affect position sizing independently (lines 2553-2603), (4) Account-specific position tracking with unique keys 'ticker_accountname' (lines 1929, 2191), (5) Round-robin timing differences causing accounts to trade same stocks at different times/prices, (6) Stop-loss/take-profit applied per account-position combination (lines 3020-3051), (7) Primary account balance used for system-wide calculations while individual accounts have separate equity tracking. These differences explain why identical stocks produce different outcomes across the 3 accounts.",
       "test_mode_critical_failure_analysis": "❌ CRITICAL TEST MODE FAILURE IDENTIFIED: --test mode (lines 5370-5437) only validates credentials and basic connectivity but completely lacks score validation. It checks if qualified stocks are returned (count > 0) but never validates actual DTS/V9B score values, ranges, or scaling. This allowed V9B scores of 0.9 instead of 90 to pass undetected for days, preventing all trading while showing false positive '✅ System Health: OPERATIONAL' and '✅ Qualified Stocks: 8'. Test mode uses real Supabase data but never calls debug output (line 1541) that would show actual score values. Missing validations: score ranges (DTS 60-100, V9B 6.0-10.0), trading thresholds (DTS ≥ 65), score scaling verification, and actual trading signal generation testing.",
       "comprehensive_health_monitoring_system": "✅ COMPREHENSIVE HEALTH MONITORING SYSTEM DEPLOYED: Created health_monitor.py with continuous DTS problem detection, 24-hour hot stock scanning for Monday-Tuesday trading, urgent Slack alerts, and real-time SystemX health monitoring. Features: DTS pipeline failure detection (NULL scores, broken scaling), hot stock identification with V9B score correction (0.9→90), system process monitoring, PM2 status checks, log activity validation, and comprehensive Slack notifications. Integrated with PM2 ecosystem for autonomous operation every 5 minutes. Successfully detected and alerted on major issues including NA (+69%), KLTO (+787%), KNW (+94%) trading opportunities with proper V9B scaling fixes.",
       "claude_nano_4_1_intelligence_integration": "✅ CLAUDE/NANO 4.1 TRADING INTELLIGENCE FULLY INTEGRATED: Successfully implemented comprehensive Claude intelligence into SystemX trading logic. Features: (1) extract_claude_signals() method extracts confidence scores, support/resistance levels, stop losses, and risk warnings from Claude analysis text, (2) Enhanced is_sure_thing_stock() incorporates Claude confidence (≥7/10 boost, ≥8.5/10 override) and applies risk penalties for high-risk warnings, (3) Position sizing enhanced with Claude confidence multipliers: 1.15-1.25x boost for high confidence (8-10/10), 1.05-1.15x for moderate (7-8/10), 0.70-1.0x penalty for low confidence (≤5/10), plus 15% risk penalty for dangerous stocks, (4) Applied to both Kelly Criterion and basic position sizing methods, (5) Comprehensive logging tracks all Claude intelligence usage for monitoring. VERIFIED WORKING: NA (+69% winner) shows Claude support $9.5, resistance $11.31, caution warnings, and volume analysis - all properly integrated into trading decisions across all 3 accounts for maximum profitability.",
@@ -395,6 +397,128 @@
       "finrl": "Full (processor_alpaca) vs Limited",
       "ppo": "Available (stable_baselines3) vs Simplified",
       "data": "Polygon + Alpaca vs Alpaca Only"
+    }
+  },
+  "slack_notification_system": {
+    "webhook_url_source": {
+      "environment_variable": "SLACK_TRADE_WEBHOOK_URL",
+      "location": "line 834",
+      "assignment": "self.slack_webhook = os.getenv('SLACK_TRADE_WEBHOOK_URL')"
+    },
+    "configuration": {
+      "rate_limiting": {
+        "cooldown_setting": "slack_cooldown: int = Field(..., ge=60, le=7200, description='Slack notification cooldown in seconds (60-7200)')",
+        "config_line": "277-281",
+        "default_cooldown": "900 seconds (15 minutes)",
+        "initialization_line": "600-601"
+      },
+      "retry_after_handling": {
+        "location": "lines 5149-5165",
+        "description": "Proper Retry-After header handling for 429 rate limits with exponential backoff",
+        "features": ["Header parsing", "Retry-After respect", "Exponential backoff", "10-minute max cooldown"]
+      }
+    },
+    "main_notification_function": {
+      "function_name": "send_slack_notification",
+      "location": "lines 5127-5172",
+      "parameters": ["title: str", "message: str", "force: bool = False"],
+      "features": [
+        "Rate limiting with cooldown periods",
+        "Retry-After header handling for 429 errors",
+        "Exponential backoff on failures",
+        "Custom username and emoji (System X, :robot_face:)",
+        "Error handling with debug output",
+        "Force flag to bypass rate limiting"
+      ]
+    },
+    "trade_execution_notifications": {
+      "function": "execute_trade",
+      "location": "lines 2114-2117",
+      "trigger_condition": "trade_value > 1000",
+      "notification_content": [
+        "Action emoji (🟢 buy, 🔴 sell)",
+        "Trade details (action, shares, ticker, price)",
+        "Account name",
+        "Trade value",
+        "Reason for trade"
+      ]
+    },
+    "system_notifications": {
+      "system_startup": {
+        "location": "line 750",
+        "trigger": "System initialization complete",
+        "message": "🚀 System X Online - Session: {session_id}, Status: OPERATIONAL"
+      },
+      "autonomous_start": {
+        "location": "lines 5389-5391",
+        "trigger": "Autonomous operation begins",
+        "message": "🚀 System X Started - Autonomous operation beginning, Session: {session_id}, Mode: 10-Day Evaluation"
+      },
+      "trading_updates": {
+        "location": "lines 1907-1908",
+        "trigger": "trades_executed > 0",
+        "message": "📈 Trading Update - Executed {trades_executed} trades, Exposure: {exposure_pct:.1%}, Session: {session_id}"
+      },
+      "portfolio_rebalancing": {
+        "location": "lines 3152-3153",
+        "trigger": "executed_trades > 0 during rebalancing",
+        "message": "🔄 Portfolio Rebalanced - Executed {executed_trades} rebalancing trades, Session: {session_id}"
+      },
+      "v9b_pipeline_alerts": {
+        "location": "lines 1747-1748",
+        "trigger": "pipeline_health == 'CRITICAL'",
+        "message": "🚨 V9B Pipeline Alert - Critical data pipeline issues detected: {issues}"
+      },
+      "emergency_stop": {
+        "location": "lines 4091-4092",
+        "trigger": "Emergency stop triggered",
+        "message": "🚨 EMERGENCY STOP - Reason: {reason}, Details: {details}, All positions closed, Session: {session_id}"
+      },
+      "backtest_results": {
+        "location": "lines 4320-4321",
+        "trigger": "best_strategy total_return > 5.0%",
+        "message": "🧪 Backtest Results - Best: {strategy}, Return: {return:.2f}%, Tickers: {tickers}"
+      },
+      "critical_errors": {
+        "location": "lines 5189-5190",
+        "trigger": "Critical system errors",
+        "message": "🚨 System X Critical Error - Type: {error_type}, Error: {error}, Count: {error_count}, Session: {session_id}"
+      },
+      "system_shutdown": {
+        "location": "lines 5196-5197",
+        "trigger": "Maximum error count reached",
+        "message": "🛑 System X Shutdown - Maximum errors reached: {error_count}, Session: {session_id}"
+      },
+      "manual_shutdown": {
+        "location": "line 5474",
+        "trigger": "KeyboardInterrupt (Ctrl+C)",
+        "message": "🛑 System X Stopped - Manual shutdown, Session: {session_id}"
+      },
+      "trading_issues": {
+        "location": "lines 5229-5230",
+        "trigger": "error_count >= max_consecutive_errors // 2",
+        "message": "⚠️ System X Trading Issues - Multiple trading errors: {error_count}, Latest: {error_msg}"
+      }
+    },
+    "notification_payload_format": {
+      "location": "lines 5140-5144",
+      "structure": {
+        "text": "*{title}*\\n{message}",
+        "username": "System X", 
+        "icon_emoji": ":robot_face:"
+      }
+    },
+    "error_handling": {
+      "network_timeout": "10 seconds timeout on Slack webhook POST",
+      "rate_limit_handling": "429 status code with Retry-After header parsing",
+      "exponential_backoff": "Cooldown increases by 1.5x on failures, max 10 minutes",
+      "graceful_degradation": "Continues operation if Slack fails, debug output only"
+    },
+    "rate_limiting_implementation": {
+      "throttle_check": "lines 5135-5138",
+      "last_notification_tracking": "self.last_slack_notification timestamp",
+      "cooldown_enforcement": "Blocks notifications within cooldown period unless force=True",
+      "dynamic_cooldown": "Adjusts based on 429 responses and Retry-After headers"
     }
   }
 }
