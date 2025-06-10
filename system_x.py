@@ -1481,7 +1481,6 @@ class SystemX:
                             # Check if data is fresh (within last 4 hours)
                             last_updated = stock.get('created_at', '')
                             if last_updated:
-                                from datetime import datetime, timedelta
                                 try:
                                     update_time = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
                                     cutoff_time = datetime.now().replace(tzinfo=update_time.tzinfo) - timedelta(hours=4)
@@ -1576,12 +1575,17 @@ class SystemX:
                 raw_v9b = self._safe_float(analysis.get('v9_combined_score'), 0)
                 combined_score = raw_v9b * 100 if raw_v9b < 10 else raw_v9b
                 
+                # Extract Claude intelligence signals
+                claude_text = str(analysis.get('claude_analysis', ''))
+                claude_signals = self.extract_claude_signals(claude_text)
+                
                 return {
                     'squeeze_confidence': self._safe_float(analysis.get('squeeze_confidence_score'), 0),
                     'trend_confidence': self._safe_float(analysis.get('trend_confidence_score'), 0), 
                     'combined_score': combined_score,
                     'dts_score': self._safe_float(analysis.get('dts_score'), 0),
-                    'claude_analysis': str(analysis.get('claude_analysis', '')),
+                    'claude_analysis': claude_text,
+                    'claude_signals': claude_signals,
                     'technical_data': analysis.get('technical_data', {}) or {}
                 }
             else:
@@ -1591,6 +1595,101 @@ class SystemX:
             if self.debug:
                 self.logger.warning(f"⚠️ V9B analysis error for {ticker}: {e}")
             return {}
+    
+    def extract_claude_signals(self, claude_text: str) -> Dict:
+        """Extract actionable trading signals from Claude analysis"""
+        if not claude_text or len(claude_text) < 50:
+            return {}
+        
+        import re
+        
+        signals = {
+            'confidence_score': None,
+            'support_levels': [],
+            'resistance_levels': [],
+            'stop_loss': None,
+            'target_price': None,
+            'risk_warnings': [],
+            'position_size_rec': None,
+            'volume_analysis': False,
+            'day_trading_confidence': None
+        }
+        
+        try:
+            # Extract Claude confidence score (7/10 format or similar)
+            confidence_patterns = [
+                r'confidence[:\s]*(\d+(?:\.\d+)?)(?:\s*[/]?\s*10)',
+                r'day.*trading.*confidence[:\s]*(\d+(?:\.\d+)?)(?:\s*[/]?\s*10)',
+                r'(\d+(?:\.\d+)?)(?:\s*[/]?\s*10).*confidence'
+            ]
+            
+            for pattern in confidence_patterns:
+                match = re.search(pattern, claude_text.lower())
+                if match:
+                    signals['confidence_score'] = float(match.group(1))
+                    if signals['confidence_score'] <= 10:  # Normalize to 0-10 scale
+                        signals['day_trading_confidence'] = signals['confidence_score']
+                    break
+            
+            # Extract support levels
+            support_matches = re.findall(r'support.*?\$(\d+(?:\.\d+)?)', claude_text.lower())
+            signals['support_levels'] = [float(m) for m in support_matches[:3]]  # Max 3 levels
+            
+            # Extract resistance levels  
+            resistance_matches = re.findall(r'resistance.*?\$(\d+(?:\.\d+)?)', claude_text.lower())
+            signals['resistance_levels'] = [float(m) for m in resistance_matches[:3]]  # Max 3 levels
+            
+            # Extract stop loss recommendations
+            stop_patterns = [
+                r'stop.*?loss.*?\$(\d+(?:\.\d+)?)',
+                r'stop.*?\$(\d+(?:\.\d+)?)',
+                r'exit.*?below.*?\$(\d+(?:\.\d+)?)'
+            ]
+            
+            for pattern in stop_patterns:
+                match = re.search(pattern, claude_text.lower())
+                if match:
+                    signals['stop_loss'] = float(match.group(1))
+                    break
+            
+            # Extract target price
+            target_patterns = [
+                r'target.*?\$(\d+(?:\.\d+)?)',
+                r'upside.*?to.*?\$(\d+(?:\.\d+)?)',
+                r'price.*?target.*?\$(\d+(?:\.\d+)?)'
+            ]
+            
+            for pattern in target_patterns:
+                match = re.search(pattern, claude_text.lower())
+                if match:
+                    signals['target_price'] = float(match.group(1))
+                    break
+            
+            # Extract risk warnings
+            risk_keywords = ['volatile', 'risky', 'caution', 'high risk', 'dangerous', 'unstable', 'speculative']
+            for keyword in risk_keywords:
+                if keyword in claude_text.lower():
+                    signals['risk_warnings'].append(keyword)
+            
+            # Check for volume analysis presence
+            volume_indicators = ['volume', 'institutional', 'retail', 'flow', 'accumulation', 'distribution']
+            signals['volume_analysis'] = any(indicator in claude_text.lower() for indicator in volume_indicators)
+            
+            # Extract position size recommendations (if any)
+            size_match = re.search(r'(?:position|size).*?(\d+(?:\.\d+)?)%', claude_text.lower())
+            if size_match:
+                signals['position_size_rec'] = float(size_match.group(1)) / 100
+            
+            if self.debug and any(signals.values()):
+                self.logger.info(f"🧠 Claude signals extracted: confidence={signals['day_trading_confidence']}, "
+                               f"support={len(signals['support_levels'])}, resistance={len(signals['resistance_levels'])}, "
+                               f"risks={len(signals['risk_warnings'])}")
+                
+        except Exception as e:
+            if self.debug:
+                self.logger.warning(f"⚠️ Claude signal extraction error: {e}")
+        
+        return signals
     
     def monitor_v9b_data_consistency(self) -> Dict:
         """Monitor V9B data pipeline consistency and report gaps"""
@@ -2183,7 +2282,40 @@ class SystemX:
                 # Standard position sizing for other cases
                 max_position = self.max_position_size
             
-            base_size = account_balance * max_position * confidence_multiplier
+            # CLAUDE INTELLIGENCE ENHANCEMENT: Apply Claude confidence to basic sizing
+            claude_confidence_boost = 1.0  # Default no boost
+            try:
+                analysis = self.get_v9b_analysis(ticker)
+                claude_signals = analysis.get('claude_signals', {})
+                claude_confidence = claude_signals.get('day_trading_confidence', 0) or 0
+                risk_warnings = claude_signals.get('risk_warnings', [])
+                
+                if claude_confidence > 0:
+                    # Apply Claude confidence boost/penalty (same logic as Kelly method)
+                    if claude_confidence >= 8.0:
+                        claude_confidence_boost = 1.15 + (claude_confidence - 8.0) * 0.05  # 1.15-1.25x boost
+                    elif claude_confidence >= 7.0:
+                        claude_confidence_boost = 1.05 + (claude_confidence - 7.0) * 0.10  # 1.05-1.15x boost
+                    elif claude_confidence <= 5.0:
+                        claude_confidence_boost = 0.70 + claude_confidence * 0.06  # 0.70-1.0x penalty
+                    
+                    # Apply risk penalty
+                    high_risk_terms = ['high risk', 'dangerous', 'speculative']
+                    if any(term in risk_warnings for term in high_risk_terms):
+                        claude_confidence_boost *= 0.85  # 15% reduction for high risk
+                    
+                    # Cap the boost/penalty
+                    claude_confidence_boost = max(0.60, min(1.30, claude_confidence_boost))
+                    
+                    if self.debug and claude_confidence_boost != 1.0:
+                        print(f"🧠 Claude basic sizing adjustment: {claude_confidence}/10 → {claude_confidence_boost:.2f}x multiplier")
+                        
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️ Claude basic sizing enhancement error for {ticker}: {e}")
+                claude_confidence_boost = 1.0
+            
+            base_size = account_balance * max_position * confidence_multiplier * claude_confidence_boost
             
             # Check available cash
             account = self.alpaca.get_account()
@@ -2202,19 +2334,70 @@ class SystemX:
             return 0
     
     def is_sure_thing_stock(self, ticker: str) -> bool:
-        """Identify 'sure thing' stocks with high DTS + high V9B scores"""
+        """Identify 'sure thing' stocks with high DTS + high V9B scores + Claude intelligence"""
         try:
-            # Get V9B analysis for the ticker
+            # Get comprehensive analysis for the ticker
             analysis = self.get_v9b_analysis(ticker)
             
             dts_score = analysis.get('dts_score', 0)
             v9b_confidence = analysis.get('combined_score', 0)
+            claude_signals = analysis.get('claude_signals', {})
+            claude_confidence = claude_signals.get('day_trading_confidence', 0) or 0
+            risk_warnings = claude_signals.get('risk_warnings', [])
             
-            # "Sure thing" criteria: DTS >= 78 AND V9B >= 8.8 (slightly more conservative than strong buy)
-            is_sure_thing = dts_score >= 78 and v9b_confidence >= 8.8
+            # Enhanced "sure thing" criteria with Claude intelligence:
+            # Base criteria: DTS >= 78 AND V9B >= 8.8
+            base_criteria = dts_score >= 78 and v9b_confidence >= 8.8
+            
+            # Claude enhancement: boost confidence if Claude agrees (>=7/10) and reduce if high risk
+            claude_boost = False
+            claude_penalty = False
+            
+            if claude_confidence >= 7.0:
+                claude_boost = True
+            
+            # Apply penalty for high-risk warnings
+            high_risk_terms = ['high risk', 'dangerous', 'speculative', 'caution']
+            if any(term in risk_warnings for term in high_risk_terms):
+                claude_penalty = True
+            
+            # Final determination with Claude intelligence
+            if base_criteria:
+                if claude_boost and not claude_penalty:
+                    # Claude confirms - definitely sure thing
+                    is_sure_thing = True
+                    sure_thing_reason = f"DTS+V9B+Claude boost (Claude: {claude_confidence}/10)"
+                elif claude_penalty:
+                    # Claude warns of high risk - reduce confidence
+                    # Only qualify if both DTS and V9B are very high (compensate for risk)
+                    is_sure_thing = dts_score >= 82 and v9b_confidence >= 9.2
+                    sure_thing_reason = f"High DTS+V9B despite Claude risk warnings"
+                else:
+                    # Base criteria met, no strong Claude signal either way
+                    is_sure_thing = True
+                    sure_thing_reason = f"Base DTS+V9B criteria"
+            else:
+                # Check if Claude confidence is extremely high (>=8.5/10) to override base criteria
+                if claude_confidence >= 8.5 and not claude_penalty and dts_score >= 75 and v9b_confidence >= 8.0:
+                    is_sure_thing = True
+                    sure_thing_reason = f"Claude override (very high confidence: {claude_confidence}/10)"
+                else:
+                    is_sure_thing = False
+                    sure_thing_reason = "Criteria not met"
             
             if self.debug and is_sure_thing:
-                print(f"🎯 SURE THING DETECTED: {ticker} - DTS: {dts_score:.1f}, V9B: {v9b_confidence:.1f}")
+                print(f"🎯 SURE THING DETECTED: {ticker} - DTS: {dts_score:.1f}, V9B: {v9b_confidence:.1f}, "
+                      f"Claude: {claude_confidence}/10, Reason: {sure_thing_reason}")
+                # Log Claude intelligence usage
+                if claude_confidence > 0:
+                    self.log_system_event("CLAUDE_SURE_THING", 
+                                         f"{ticker}: Claude confidence {claude_confidence}/10 contributed to sure thing detection")
+            elif self.debug and base_criteria and not is_sure_thing:
+                print(f"⚠️ SURE THING DOWNGRADED: {ticker} - {sure_thing_reason}, Risks: {risk_warnings}")
+                # Log Claude intelligence downgrade
+                if claude_confidence > 0 or risk_warnings:
+                    self.log_system_event("CLAUDE_DOWNGRADE", 
+                                         f"{ticker}: Claude analysis downgraded sure thing (confidence: {claude_confidence}/10, risks: {risk_warnings})")
             
             return is_sure_thing
             
@@ -2314,8 +2497,55 @@ class SystemX:
                 
             base_fraction = min(valid_constraints)
             
-            # Apply confidence multiplier and risk adjustment
-            adjusted_fraction = base_fraction * confidence_multiplier * self.risk_adjustment_factor
+            # CLAUDE INTELLIGENCE ENHANCEMENT: Get Claude signals for enhanced position sizing
+            claude_confidence_boost = 1.0  # Default no boost
+            try:
+                analysis = self.get_v9b_analysis(ticker)
+                claude_signals = analysis.get('claude_signals', {})
+                claude_confidence = claude_signals.get('day_trading_confidence', 0) or 0
+                risk_warnings = claude_signals.get('risk_warnings', [])
+                
+                if claude_confidence > 0:
+                    # Apply Claude confidence boost/penalty
+                    if claude_confidence >= 8.0:
+                        # High Claude confidence (8-10/10): boost position size
+                        claude_confidence_boost = 1.15 + (claude_confidence - 8.0) * 0.05  # 1.15-1.25x boost
+                        if self.debug:
+                            print(f"🧠 Claude confidence boost: {claude_confidence}/10 → {claude_confidence_boost:.2f}x multiplier")
+                        self.log_system_event("CLAUDE_POSITION_BOOST", 
+                                            f"{ticker}: High Claude confidence {claude_confidence}/10 boosted position size by {claude_confidence_boost:.2f}x")
+                    elif claude_confidence >= 7.0:
+                        # Moderate Claude confidence (7-8/10): small boost
+                        claude_confidence_boost = 1.05 + (claude_confidence - 7.0) * 0.10  # 1.05-1.15x boost
+                        if self.debug:
+                            print(f"🧠 Claude moderate boost: {claude_confidence}/10 → {claude_confidence_boost:.2f}x multiplier")
+                        self.log_system_event("CLAUDE_POSITION_BOOST", 
+                                            f"{ticker}: Moderate Claude confidence {claude_confidence}/10 boosted position size by {claude_confidence_boost:.2f}x")
+                    elif claude_confidence <= 5.0:
+                        # Low Claude confidence (≤5/10): reduce position size
+                        claude_confidence_boost = 0.70 + claude_confidence * 0.06  # 0.70-1.0x penalty
+                        if self.debug:
+                            print(f"🧠 Claude confidence penalty: {claude_confidence}/10 → {claude_confidence_boost:.2f}x multiplier")
+                        self.log_system_event("CLAUDE_POSITION_PENALTY", 
+                                            f"{ticker}: Low Claude confidence {claude_confidence}/10 reduced position size by {claude_confidence_boost:.2f}x")
+                    
+                    # Apply additional penalty for high-risk warnings
+                    high_risk_terms = ['high risk', 'dangerous', 'speculative']
+                    if any(term in risk_warnings for term in high_risk_terms):
+                        claude_confidence_boost *= 0.85  # 15% reduction for high risk
+                        if self.debug:
+                            print(f"🧠 Claude risk penalty applied: final multiplier {claude_confidence_boost:.2f}x")
+                    
+                    # Cap the boost/penalty to reasonable ranges
+                    claude_confidence_boost = max(0.60, min(1.30, claude_confidence_boost))
+                    
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️ Claude confidence enhancement error for {ticker}: {e}")
+                claude_confidence_boost = 1.0
+            
+            # Apply confidence multiplier, Claude intelligence, and risk adjustment
+            adjusted_fraction = base_fraction * confidence_multiplier * claude_confidence_boost * self.risk_adjustment_factor
             
             # Final safety check - ensure we don't exceed any single constraint
             adjusted_fraction = max(0, min(adjusted_fraction, min(valid_constraints)))
