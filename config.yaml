@@ -5,6 +5,29 @@ trading:
   take_profit_pct: 0.10
   max_day_trades: 3
 
+# PER-ACCOUNT CONFIGURATION: Based on Day 3 analysis showing Account 3's superior performance
+account_configs:
+  PRIMARY_30K:
+    max_position_size: 0.15  # Conservative sizing based on Account 3's success
+    aggressive_sizing_enabled: false  # Disabled aggressive sizing
+    max_sure_thing_size: 0.15  # No aggressive caps
+    risk_multiplier: 1.0
+    daily_loss_limit: 0.03
+  
+  SECONDARY_30K:
+    max_position_size: 0.15  # Conservative sizing based on Account 3's success  
+    aggressive_sizing_enabled: false  # Disabled aggressive sizing
+    max_sure_thing_size: 0.15  # No aggressive caps
+    risk_multiplier: 1.0
+    daily_loss_limit: 0.03
+  
+  TERTIARY_30K:
+    max_position_size: 0.15  # Keep winning strategy
+    aggressive_sizing_enabled: false  # Already conservative
+    max_sure_thing_size: 0.15  # No aggressive caps
+    risk_multiplier: 1.0
+    daily_loss_limit: 0.03
+
 risk_management:
   max_daily_loss: 0.03
   kelly_enabled: true
@@ -29,3 +52,10 @@ performance_targets:
   min_sharpe_ratio: 1.0
   max_drawdown_limit: 0.15
   min_win_rate: 0.55
+
+# ADAPTIVE RISK MANAGEMENT: Auto-tuning based on performance
+adaptive_risk:
+  enable_4pm_auto_tuning: true
+  performance_threshold: 0.02  # 2% outperformance triggers changes
+  conservative_fallback: true  # Fall back to conservative on losses
+  account_isolation: true  # Strict per-account risk tracking

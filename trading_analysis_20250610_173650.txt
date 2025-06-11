@@ -1,0 +1,165 @@
+
+🎯 EXECUTIVE SUMMARY
+--------------------------------------------------
+🔴 PRIMARY_30K: $-1,894 (-6.31%)
+🔴 SECONDARY_30K: $-2,696 (-8.99%)
+🟢 TERTIARY_30K: $+2,669 (+8.90%)
+
+📊 Total filled orders today: 87
+
+⏱️ TIMING DIFFERENCES ANALYSIS
+--------------------------------------------------
+
+📈 KLTO:
+   Time spread: 382.4 minutes
+   Price spread: $-1.1303
+   First fill: PRIMARY_30K @ 09:30:45
+   Last fill: PRIMARY_30K @ 15:53:08
+   Timing impact: $-2098.95
+
+📈 NA:
+   Time spread: 310.3 minutes
+   Price spread: $-0.4150
+   First fill: SECONDARY_30K @ 09:30:49
+   Last fill: TERTIARY_30K @ 14:41:05
+   Timing impact: $-134.06
+
+📈 ARAI:
+   Time spread: 113.1 minutes
+   Price spread: $+1.4100
+   First fill: PRIMARY_30K @ 12:17:08
+   Last fill: PRIMARY_30K @ 14:10:11
+   Timing impact: $+411.72
+
+📈 CARM:
+   Time spread: 342.6 minutes
+   Price spread: $+0.1736
+   First fill: SECONDARY_30K @ 10:10:29
+   Last fill: TERTIARY_30K @ 15:53:06
+   Timing impact: $+440.60
+
+📈 INM:
+   Time spread: 265.7 minutes
+   Price spread: $-0.0800
+   First fill: TERTIARY_30K @ 09:59:57
+   Last fill: SECONDARY_30K @ 14:25:37
+   Timing impact: $-231.68
+
+📈 CRCL:
+   Time spread: 255.3 minutes
+   Price spread: $-3.3700
+   First fill: TERTIARY_30K @ 10:05:11
+   Last fill: SECONDARY_30K @ 14:20:26
+   Timing impact: $-90.99
+
+📈 NCNA:
+   Time spread: 25.8 minutes
+   Price spread: $-0.0076
+   First fill: SECONDARY_30K @ 12:17:08
+   Last fill: SECONDARY_30K @ 12:42:55
+   Timing impact: $-157.72
+
+❌ TOP GAINERS MISSED
+--------------------------------------------------
+None of today's top gainers were captured by any account:
+   ❌ BULLZ +53.2%
+   ❌ NKTR +29.1%
+   ❌ INSM +28.6%
+   ❌ BGM +23.8%
+   ❌ MTSR +15.5%
+
+📋 DETAILED ORDER ANALYSIS
+--------------------------------------------------
+
+PRIMARY_30K (27 orders):
+   🟢 KLTO: buy 1857.0 @ $1.95 at 15:53:08
+   🔴 NA: sell 762.0 @ $10.90 at 14:41:02
+   🟢 NA: buy 528.0 @ $11.99 at 14:25:36
+   🔴 KLTO: sell 1457.0 @ $1.80 at 14:25:31
+   🔴 ARAI: sell 292.0 @ $12.65 at 14:10:11
+   🟢 NA: buy 234.0 @ $11.94 at 13:59:55
+   🔴 CARM: sell 2702.0 @ $0.71 at 13:54:48
+   🟢 CARM: buy 2702.0 @ $0.77 at 12:48:00
+   🔴 CARM: sell 4229.0 @ $0.71 at 12:37:45
+   🟢 KLTO: buy 1457.0 @ $1.93 at 12:37:44
+   🟢 ARAI: buy 292.0 @ $11.24 at 12:17:08
+   🟢 INM: buy 1429.0 @ $2.76 at 12:11:59
+   🔴 KLTO: sell 1456.0 @ $2.21 at 12:01:41
+   🟢 KLTO: buy 1456.0 @ $2.78 at 11:56:30
+   🟢 CARM: buy 4229.0 @ $0.79 at 11:51:23
+   🔴 INM: sell 1593.0 @ $2.71 at 11:46:16
+   🔴 NA: sell 648.0 @ $11.70 at 11:36:02
+   🔴 KLTO: sell 2195.0 @ $3.17 at 11:05:18
+   🟢 KLTO: buy 2195.0 @ $3.35 at 10:24:18
+   🟢 NA: buy 648.0 @ $10.40 at 10:10:30
+   🟢 INM: buy 1593.0 @ $2.89 at 10:05:10
+   🔴 KLTO: sell 1228.0 @ $3.53 at 09:59:56
+   🔴 NA: sell 346.0 @ $10.11 at 09:51:13
+   🟢 KLTO: buy 1228.0 @ $3.07 at 09:45:59
+   🔴 KLTO: sell 1515.0 @ $2.77 at 09:35:31
+   🟢 NA: buy 346.0 @ $10.81 at 09:35:31
+   🟢 KLTO: buy 1515.0 @ $3.08 at 09:30:45
+
+SECONDARY_30K (29 orders):
+   🔴 CARM: sell 10532.0 @ $0.76 at 15:32:36
+   🔴 NA: sell 245.0 @ $10.90 at 14:41:04
+   🟢 INM: buy 2896.0 @ $2.77 at 14:25:37
+   🟢 CARM: buy 10532.0 @ $0.68 at 14:25:38
+   🟢 CRCL: buy 27.0 @ $106.24 at 14:20:26
+   🔴 CARM: sell 2904.0 @ $0.67 at 14:15:18
+   🟢 NA: buy 245.0 @ $11.98 at 14:15:18
+   🟢 CARM: buy 2904.0 @ $0.72 at 13:59:55
+   🔴 CARM: sell 2474.0 @ $0.71 at 13:54:48
+   🟢 CARM: buy 2474.0 @ $0.76 at 13:44:32
+   🔴 NA: sell 209.0 @ $11.60 at 13:39:24
+   🟢 NA: buy 209.0 @ $12.40 at 12:53:10
+   🔴 NCNA: sell 20753.0 @ $0.13 at 12:42:55
+   🔴 KLTO: sell 1802.0 @ $1.94 at 12:32:34
+   🟢 NCNA: buy 20753.0 @ $0.14 at 12:17:08
+   🟢 KLTO: buy 1802.0 @ $2.16 at 12:06:49
+   🔴 KLTO: sell 1378.0 @ $2.21 at 12:01:41
+   🟢 KLTO: buy 1378.0 @ $2.90 at 11:51:24
+   🔴 INM: sell 2836.0 @ $2.71 at 11:46:16
+   🔴 NA: sell 949.0 @ $11.81 at 11:41:08
+   🟢 NA: buy 648.0 @ $10.60 at 10:24:18
+   🔴 CARM: sell 8033.0 @ $0.79 at 10:24:14
+   🟢 INM: buy 2836.0 @ $2.89 at 10:10:29
+   🟢 CARM: buy 8033.0 @ $0.92 at 10:10:29
+   🔴 KLTO: sell 1131.0 @ $3.06 at 09:46:00
+   🟢 NA: buy 301.0 @ $10.60 at 09:45:59
+   🟢 KLTO: buy 1131.0 @ $3.42 at 09:40:45
+   🔴 NA: sell 410.0 @ $10.30 at 09:35:31
+   🟢 NA: buy 410.0 @ $11.32 at 09:30:49
+
+TERTIARY_30K (31 orders):
+   🟢 CARM: buy 2538.0 @ $1.09 at 15:53:06
+   🔴 CARM: sell 3158.0 @ $1.15 at 15:48:00
+   🟢 CARM: buy 3158.0 @ $0.87 at 15:37:42
+   🔴 CARM: sell 3382.0 @ $0.74 at 15:27:23
+   🔴 KLTO: sell 3905.0 @ $2.03 at 15:01:41
+   🔴 NA: sell 323.0 @ $10.90 at 14:41:05
+   🟢 KLTO: buy 3905.0 @ $1.81 at 14:25:36
+   🟢 INM: buy 1089.0 @ $2.78 at 14:20:24
+   🟢 CARM: buy 3382.0 @ $0.67 at 14:15:17
+   🔴 KLTO: sell 1217.0 @ $1.95 at 14:10:12
+   🟢 KLTO: buy 1217.0 @ $2.06 at 13:44:32
+   🔴 CARM: sell 2982.0 @ $0.81 at 13:34:18
+   🟢 CARM: buy 2982.0 @ $0.71 at 12:37:42
+   🔴 CARM: sell 3702.0 @ $0.77 at 12:12:01
+   🟢 CRCL: buy 30.0 @ $106.75 at 12:11:59
+   🔴 INM: sell 4449.0 @ $2.67 at 12:06:50
+   🟢 NA: buy 323.0 @ $12.20 at 12:06:48
+   🟢 CARM: buy 3702.0 @ $0.81 at 11:56:30
+   🔴 CARM: sell 9424.0 @ $0.92 at 11:46:18
+   🔴 NA: sell 352.0 @ $11.70 at 11:36:01
+   🔴 CRCL: sell 34.0 @ $104.10 at 10:49:54
+   🔴 KLTO: sell 3095.0 @ $3.33 at 10:29:26
+   🟢 INM: buy 2856.0 @ $2.84 at 10:24:20
+   🟢 CARM: buy 9424.0 @ $0.80 at 10:24:19
+   🟢 KLTO: buy 2082.0 @ $3.55 at 10:10:29
+   🟢 CRCL: buy 34.0 @ $109.61 at 10:05:11
+   🟢 INM: buy 1593.0 @ $2.85 at 09:59:57
+   🟢 KLTO: buy 1013.0 @ $3.26 at 09:51:13
+   🔴 KLTO: sell 1333.0 @ $3.41 at 09:40:45
+   🟢 NA: buy 352.0 @ $10.35 at 09:40:45
+   🟢 KLTO: buy 1333.0 @ $2.72 at 09:35:29

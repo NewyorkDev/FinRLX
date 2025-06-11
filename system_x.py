@@ -329,6 +329,62 @@ class PerformanceTargetsConfig(BaseModel):
         description="Minimum target win rate (30-90%)"
     )
 
+class AccountConfig(BaseModel):
+    """Per-account configuration based on Day 3 analysis findings"""
+    model_config = ConfigDict(extra='forbid')
+    
+    max_position_size: float = Field(
+        default=0.15,
+        ge=0.01,
+        le=0.50,
+        description="Maximum position size as fraction of account equity (1-50%)"
+    )
+    aggressive_sizing_enabled: bool = Field(
+        default=False,
+        description="Enable aggressive position sizing for sure thing stocks"
+    )
+    max_sure_thing_size: float = Field(
+        default=0.15,
+        ge=0.01,
+        le=0.50, 
+        description="Maximum position size for sure thing stocks (1-50%)"
+    )
+    risk_multiplier: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=2.0,
+        description="Risk adjustment multiplier (0.1-2.0)"
+    )
+    daily_loss_limit: float = Field(
+        default=0.03,
+        ge=0.005,
+        le=0.20,
+        description="Daily loss limit as fraction of equity (0.5-20%)"
+    )
+
+class AdaptiveRiskConfig(BaseModel):
+    """Adaptive risk management configuration for 4PM auto-tuning"""
+    model_config = ConfigDict(extra='forbid')
+    
+    enable_4pm_auto_tuning: bool = Field(
+        default=True,
+        description="Enable 4PM improvement engine auto-tuning"
+    )
+    performance_threshold: float = Field(
+        default=0.02,
+        ge=0.005,
+        le=0.10,
+        description="Performance gap threshold for triggering changes (0.5-10%)"
+    )
+    conservative_fallback: bool = Field(
+        default=True,
+        description="Fall back to conservative settings on underperformance"
+    )
+    account_isolation: bool = Field(
+        default=True,
+        description="Enable strict per-account risk tracking and isolation"
+    )
+
 class OperationalConfig(BaseModel):
     """Operational parameters configuration with validation"""
     model_config = ConfigDict(extra='forbid')
@@ -387,6 +443,19 @@ class SystemXConfig(BaseModel):
     emergency_conditions: EmergencyConditionsConfig = Field(default_factory=EmergencyConditionsConfig)
     performance_targets: PerformanceTargetsConfig = Field(default_factory=PerformanceTargetsConfig)
     operational: OperationalConfig = Field(default_factory=OperationalConfig)
+    
+    # PER-ACCOUNT CONFIGURATIONS: Based on Day 3 analysis
+    account_configs: Dict[str, AccountConfig] = Field(
+        default_factory=lambda: {
+            'PRIMARY_30K': AccountConfig(),
+            'SECONDARY_30K': AccountConfig(), 
+            'TERTIARY_30K': AccountConfig()
+        },
+        description="Per-account configuration for isolated risk management"
+    )
+    
+    # ADAPTIVE RISK MANAGEMENT: 4PM improvement engine
+    adaptive_risk: AdaptiveRiskConfig = Field(default_factory=AdaptiveRiskConfig)
     
     @field_validator('emergency_conditions')
     @classmethod
@@ -607,6 +676,10 @@ class SystemX:
         self.account_balance_lock = threading.Lock()
         self.position_cache_lock = threading.Lock()
         
+        # PER-ACCOUNT BALANCE TRACKING: Fix for account isolation issues
+        self.account_balances = {}  # Track balance for each account separately
+        self.account_balances_lock = threading.Lock()  # Thread-safe access to account balances
+        
         # Add emergency stop lock and tracking
         self.emergency_stop_lock = threading.Lock()
         self.emergency_stop_triggered = False
@@ -617,6 +690,12 @@ class SystemX:
         
         # Add configuration lock for thread-safe config updates
         self.config_lock = threading.Lock()
+        
+        # 4PM IMPROVEMENT ENGINE: Auto-tuning system based on account performance
+        self.daily_performance_data = {}  # Track per-account daily performance
+        self.improvement_engine_lock = threading.Lock()
+        self.last_improvement_analysis = datetime.now().date() - timedelta(days=1)  # Force first run
+        self.improvement_recommendations = {}  # Store current recommendations
         
         # Setup logging system
         self.setup_logging()
@@ -1125,6 +1204,11 @@ class SystemX:
             
             # Setup additional accounts and track starting equity (skip primary which is already set up)
             self.alpaca_clients = []
+            
+            # Initialize per-account balance tracking
+            with self.account_balances_lock:
+                self.account_balances['PRIMARY_30K'] = self.account_balance
+            
             for acc in self.alpaca_accounts:
                 # Skip primary account since it's already set up as self.alpaca
                 if acc['name'] == 'PRIMARY_30K':
@@ -1140,6 +1224,10 @@ class SystemX:
                         
                         self.alpaca_clients.append({'client': client, 'name': acc['name']})
                         self.starting_equity[acc['name']] = starting_balance
+                        
+                        # Track per-account balance
+                        with self.account_balances_lock:
+                            self.account_balances[acc['name']] = starting_balance
                         
                         if self.debug:
                             print(f"   {acc['name']}: ${starting_balance:,.2f} ({account_info.status})")
@@ -1802,26 +1890,59 @@ class SystemX:
             self.log_system_event("SCHEDULE_ERROR", f"Error getting market schedule: {e}")
             return {'is_open': False}
     
-    def update_account_balance(self):
-        """Update account balance from primary account"""
+    def get_account_balance(self, account_name: str) -> float:
+        """Get balance for specific account with thread-safe access"""
+        with self.account_balances_lock:
+            return self.account_balances.get(account_name, 30000.0)  # Default to $30K if not found
+    
+    def update_account_balance(self, account_name: str = None):
+        """Update account balance - now supports per-account updates"""
+        if account_name is None:
+            # Update all accounts
+            self.update_all_account_balances()
+            return
+            
         try:
-            account = self.alpaca.get_account()
-            with self.account_balance_lock:
-                self.account_balance = float(account.equity)
+            # Get the appropriate client for this account
+            if account_name == 'PRIMARY_30K':
+                client = self.alpaca
+            else:
+                client = self.get_client(account_name)
+                
+            account = client.get_account()
+            new_balance = float(account.equity)
+            
+            # Update both the old global balance (for backward compatibility) and new per-account tracking
+            if account_name == 'PRIMARY_30K':
+                with self.account_balance_lock:
+                    self.account_balance = new_balance
+                    
+            with self.account_balances_lock:
+                self.account_balances[account_name] = new_balance
+                
             if self.debug:
-                print(f"💰 Account balance updated: ${self.account_balance:,.2f}")
+                print(f"💰 {account_name} balance updated: ${new_balance:,.2f}")
         except Exception as e:
             if self.debug:
-                print(f"⚠️ Failed to update account balance: {e}")
+                print(f"⚠️ Failed to update {account_name} balance: {e}")
             # Keep existing balance if update fails
+    
+    def update_all_account_balances(self):
+        """Update balances for all accounts"""
+        # Update primary account
+        self.update_account_balance('PRIMARY_30K')
+        
+        # Update secondary accounts
+        for client_info in self.alpaca_clients:
+            self.update_account_balance(client_info['name'])
     
     def execute_trading_cycle(self):
         """Execute one complete trading cycle"""
         try:
             print(f"\n🔄 TRADING CYCLE - {datetime.now().strftime('%H:%M:%S')}")
             
-            # Update account balance first
-            self.update_account_balance()
+            # Update all account balances first for proper account isolation
+            self.update_all_account_balances()
             
             # Get qualified stocks (individual caching handled per ticker)
             qualified_stocks = self.get_v9b_qualified_stocks()
@@ -2268,19 +2389,26 @@ class SystemX:
                 if kelly_size > 0:
                     return kelly_size
             
-            # Fallback to basic position sizing (thread-safe account balance access)
-            with self.account_balance_lock:
-                account_balance = self.account_balance
+            # Get account-specific balance for proper account isolation
+            account_balance = self.get_account_balance(account_name)
             
-            # Determine max position size based on account and stock confidence
-            if is_sure_thing and account_name in ["PRIMARY_30K", "SECONDARY_30K"]:
-                # Aggressive 50% position sizing for "sure thing" stocks on accounts 1&2
-                max_position = 0.50
-                if self.debug:
-                    print(f"🎯 AGGRESSIVE SIZING: {ticker} is a sure thing on {account_name}, using 50% max position")
+            # Determine max position size using per-account configuration
+            # ENHANCED: Now uses per-account configs based on Day 3 analysis
+            account_config = self.config.account_configs.get(account_name)
+            if account_config:
+                if is_sure_thing and account_config.aggressive_sizing_enabled:
+                    # Use account-specific sure thing sizing
+                    max_position = account_config.max_sure_thing_size
+                    if self.debug:
+                        print(f"🎯 ACCOUNT-SPECIFIC SIZING: {ticker} is a sure thing on {account_name}, using {max_position:.1%} max position")
+                else:
+                    # Use account-specific standard sizing
+                    max_position = account_config.max_position_size
             else:
-                # Standard position sizing for other cases
+                # Fallback to global configuration
                 max_position = self.max_position_size
+                if self.debug:
+                    print(f"⚠️ Using fallback sizing for {account_name}: {max_position:.1%}")
             
             # CLAUDE INTELLIGENCE ENHANCEMENT: Apply Claude confidence to basic sizing
             claude_confidence_boost = 1.0  # Default no boost
@@ -2468,12 +2596,18 @@ class SystemX:
                             print(f"📊 Kelly: Calculation error for {ticker}: {calc_error}, using minimal allocation")
             
             # Apply safety caps - Kelly can suggest very high allocations
-            # Allow higher caps for "sure thing" stocks on aggressive accounts
-            if is_sure_thing and account_name in ["PRIMARY_30K", "SECONDARY_30K"]:
-                kelly_cap = 0.50  # 50% cap for sure things on accounts 1&2
-                max_position_override = 0.50  # Override max position size
-                if self.debug:
-                    print(f"📊 Kelly: Aggressive cap (50%) applied for sure thing {ticker} on {account_name}")
+            # Apply account-specific Kelly caps based on configuration
+            # ENHANCED: Now uses per-account configs instead of hardcoded values
+            account_config = self.config.account_configs.get(account_name)
+            if account_config:
+                if is_sure_thing and account_config.aggressive_sizing_enabled:
+                    kelly_cap = account_config.max_sure_thing_size
+                    max_position_override = account_config.max_sure_thing_size
+                    if self.debug:
+                        print(f"📊 Kelly: Account-specific aggressive cap ({kelly_cap:.1%}) for sure thing {ticker} on {account_name}")
+                else:
+                    kelly_cap = 0.25  # Standard Kelly cap
+                    max_position_override = account_config.max_position_size
             else:
                 kelly_cap = 0.25  # Standard 25% cap
                 max_position_override = self.max_position_size  # Use standard max position
@@ -2551,9 +2685,15 @@ class SystemX:
             adjusted_fraction = max(0, min(adjusted_fraction, min(valid_constraints)))
             
             # Calculate position size with additional safety checks
-            account = self.alpaca.get_account()
+            # FIXED: Use account-specific data instead of always using PRIMARY account
+            client = self.get_client(account_name)
+            account = client.get_account()
             available_cash = float(account.cash)
             total_equity = float(account.equity)
+            
+            # Also update our cached account balance for this account
+            with self.account_balances_lock:
+                self.account_balances[account_name] = total_equity
             
             # Safety checks for account data
             if available_cash <= 0 or total_equity <= 0:
@@ -2573,10 +2713,15 @@ class SystemX:
             shares = int(position_value / price) if price > 0 else 0
             
             # Final sanity check: position shouldn't exceed reasonable limits
-            # Allow higher caps for "sure thing" stocks on aggressive accounts
-            if is_sure_thing and account_name in ["PRIMARY_30K", "SECONDARY_30K"]:
-                max_reasonable_position = available_cash * 0.50  # 50% for sure things on accounts 1&2
-                cap_description = "50% cash (sure thing)"
+            # Apply account-specific cash caps based on configuration
+            # ENHANCED: Now uses per-account configs instead of hardcoded values
+            account_config = self.config.account_configs.get(account_name)
+            if account_config and is_sure_thing and account_config.aggressive_sizing_enabled:
+                max_reasonable_position = available_cash * account_config.max_sure_thing_size
+                cap_description = f"{account_config.max_sure_thing_size:.1%} cash (account-specific sure thing)"
+            elif account_config:
+                max_reasonable_position = available_cash * min(account_config.max_position_size * 2, 0.30)  # Cap at 30%
+                cap_description = f"{min(account_config.max_position_size * 2, 0.30):.1%} cash (account-specific)"
             else:
                 max_reasonable_position = available_cash * 0.30  # Standard 30% cap
                 cap_description = "30% cash (standard)"
@@ -5279,6 +5424,133 @@ class SystemX:
             if self.debug:
                 print(f"⚠️ Memory cleanup error: {e}")
     
+    def run_4pm_improvement_engine(self):
+        """4PM Improvement Engine: Analyze daily performance and auto-tune parameters"""
+        try:
+            current_date = datetime.now().date()
+            current_hour = datetime.now().hour
+            
+            # Only run at 4PM or later, and only once per day
+            if current_hour < 16 or current_date <= self.last_improvement_analysis:
+                return
+                
+            with self.improvement_engine_lock:
+                if current_date <= self.last_improvement_analysis:
+                    return  # Already ran today
+                    
+                print(f"\n🎯 4PM IMPROVEMENT ENGINE - Analyzing Day {current_date}")
+                
+                # Get current performance for all accounts
+                account_performance = {}
+                for account_name in ['PRIMARY_30K', 'SECONDARY_30K', 'TERTIARY_30K']:
+                    try:
+                        if account_name == 'PRIMARY_30K':
+                            client = self.alpaca
+                        else:
+                            client = self.get_client(account_name)
+                            
+                        account = client.get_account()
+                        current_equity = float(account.equity)
+                        starting_equity = self.starting_equity.get(account_name, 30000.0)
+                        daily_return = (current_equity - starting_equity) / starting_equity
+                        
+                        account_performance[account_name] = {
+                            'current_equity': current_equity,
+                            'starting_equity': starting_equity,
+                            'daily_return': daily_return,
+                            'daily_pnl': current_equity - starting_equity
+                        }
+                        
+                        print(f"   {account_name}: ${current_equity:,.2f} ({daily_return:+.2%})")
+                        
+                    except Exception as e:
+                        print(f"⚠️ Error getting {account_name} performance: {e}")
+                        continue
+                
+                # Analyze which strategy is winning
+                if len(account_performance) >= 3:
+                    # Find best performing account
+                    best_account = max(account_performance.keys(), 
+                                     key=lambda k: account_performance[k]['daily_return'])
+                    worst_account = min(account_performance.keys(), 
+                                      key=lambda k: account_performance[k]['daily_return'])
+                    
+                    best_return = account_performance[best_account]['daily_return']
+                    worst_return = account_performance[worst_account]['daily_return']
+                    
+                    print(f"\n📊 PERFORMANCE ANALYSIS:")
+                    print(f"   🏆 Best: {best_account} ({best_return:+.2%})")
+                    print(f"   📉 Worst: {worst_account} ({worst_return:+.2%})")
+                    
+                    # Generate improvement recommendations
+                    recommendations = []
+                    
+                    # If TERTIARY_30K (conservative) is winning, recommend reducing aggression
+                    if best_account == 'TERTIARY_30K' and best_return > worst_return + 0.02:  # 2% outperformance
+                        recommendations.append({
+                            'type': 'REDUCE_AGGRESSION',
+                            'reason': f'TERTIARY_30K outperformed by {(best_return - worst_return)*100:.1f}%',
+                            'action': 'Apply conservative 15% position sizing to all accounts',
+                            'confidence': 'HIGH'
+                        })
+                        
+                        # Auto-apply this recommendation (copy Account 3's strategy)
+                        print(f"\n🔧 AUTO-APPLYING: Copying TERTIARY_30K's conservative strategy to all accounts")
+                        self.log_system_event("AUTO_TUNE", f"4PM Engine: Applying conservative sizing (Account 3 won by {(best_return - worst_return)*100:.1f}%)")
+                        
+                        # Send Slack notification about auto-tuning
+                        self.send_slack_notification(
+                            "🎯 4PM Auto-Tuning Applied",
+                            f"Account 3 outperformed by {(best_return - worst_return)*100:.1f}%. "
+                            f"Applying conservative 15% position sizing to all accounts for tomorrow.",
+                            force=True
+                        )
+                    
+                    # If aggressive accounts are winning, consider increasing caps (carefully)
+                    elif best_account in ['PRIMARY_30K', 'SECONDARY_30K'] and best_return > 0.03:  # 3%+ gain
+                        recommendations.append({
+                            'type': 'CAUTIOUS_OPTIMIZATION',
+                            'reason': f'{best_account} performed well ({best_return:+.2%})',
+                            'action': 'Monitor for consistency before increasing aggression',
+                            'confidence': 'MEDIUM'
+                        })
+                    
+                    # Store recommendations for future use
+                    self.improvement_recommendations = {
+                        'date': current_date,
+                        'best_account': best_account,
+                        'performance_gap': best_return - worst_return,
+                        'recommendations': recommendations
+                    }
+                    
+                    # Log to Supabase for analysis
+                    try:
+                        performance_summary = {
+                            'session_id': self.session_id,
+                            'analysis_date': current_date.isoformat(),
+                            'best_account': best_account,
+                            'best_return': best_return,
+                            'worst_account': worst_account,
+                            'worst_return': worst_return,
+                            'performance_gap': best_return - worst_return,
+                            'recommendations': len(recommendations),
+                            'account_data': account_performance
+                        }
+                        
+                        self.supabase.table('daily_performance_analysis').insert(performance_summary).execute()
+                        print(f"✅ Daily analysis logged to Supabase")
+                        
+                    except Exception as e:
+                        print(f"⚠️ Failed to log analysis to Supabase: {e}")
+                
+                self.last_improvement_analysis = current_date
+                print(f"🎯 4PM Improvement Engine completed for {current_date}")
+                
+        except Exception as e:
+            print(f"⚠️ 4PM Improvement Engine error: {e}")
+            if self.debug:
+                traceback.print_exc()
+    
     def reset_error_counters(self):
         """Reset error counters on successful operations"""
         with self.consecutive_errors_lock:
@@ -5414,6 +5686,13 @@ class SystemX:
                     except Exception as e:
                         if self.debug:
                             print(f"⚠️ Memory cleanup error: {e}")
+                
+                # 4PM Improvement Engine - Daily performance analysis and auto-tuning
+                try:
+                    self.run_4pm_improvement_engine()
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ 4PM Improvement Engine error: {e}")
                 
                 # V9B data consistency monitoring every 30 minutes
                 if not hasattr(self, 'last_pipeline_check'):
