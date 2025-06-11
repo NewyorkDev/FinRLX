@@ -36,10 +36,15 @@ Scripts designed for one-time use (indicated by suffix):
 - `create_supabase_tables_(one-time).py` - Initial table setup
 - `test_supabase_connection_(one-time).py` - Connection testing
 
+### 📁 `experimental-features/`
+Experimental implementations that were tested but not adopted:
+- `system_x_improvements.py` - Batch order coordination and momentum screening experiments
+- `start_system_x_improved.sh` - Enhanced launcher script with PM2, Redis, and advanced features
+
 ## Active Systems
 
 **Currently Active:**
-- `system_x.py` - Main autonomous trading and backtesting system
+- `system_x.py` - Main autonomous trading and backtesting system with Account Mode System
 - `start_system_x.sh` - System X management script
 - V9B system (separate repository)
 

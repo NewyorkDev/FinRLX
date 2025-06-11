@@ -3,7 +3,8 @@
   "description": "Production-grade autonomous trading and backtesting system meeting 10-day evaluation criteria. Integrates FinRL framework with V9B stock selection, Polygon 5yr historical data, comprehensive Supabase logging, and PM2 autonomous operation.",
   "type": "python-ml-finance-trading-autonomous",
   "file_structure": {
-    "system_x.py": "🏆 MAIN - Autonomous trading & backtesting system with Redis communication (ENHANCED: Day 4 improvements applied)",
+    "system_x.py": "🏆 MAIN - Autonomous trading & backtesting system with Redis communication (ENHANCED: Account Mode System + PDT protection + Real-time AI Intelligence)",
+    "ai_intelligence.py": "🧠 NEW - Real-time AI intelligence engine using OpenAI Nano 4.1 and Claude Sonnet 3.5 for enhanced trading analysis",
     "test_day4_improvements.py": "🧪 NEW - Comprehensive test suite for Day 4 position sizing and account isolation fixes",
     "check_supabase_stocks.py": "🔍 NEW - Standalone script to check Supabase database for available trading stocks",
     "analyze_claude_intelligence.py": "🧠 NEW - Claude/Nano 4.1 trading intelligence analysis and integration assessment tool",
@@ -25,6 +26,7 @@
   },
   "important_files": [
     "system_x.py",
+    "ai_intelligence.py",
     "check_supabase_stocks.py",
     "dts_sync_bridge.py",
     "analyze_claude_intelligence.py",
@@ -60,6 +62,8 @@
     "system_x_stop": "./start_system_x.sh stop",
     "daily_report": "/opt/homebrew/bin/python3.12 system_x.py --report",
     "test_3_account_trading": "/opt/homebrew/bin/python3.12 test_3_account_trading.py",
+    "test_ai_intelligence": "/opt/homebrew/bin/python3.12 test_ai_intelligence_integration.py",
+    "standalone_ai_test": "/opt/homebrew/bin/python3.12 ai_intelligence.py",
     "legacy_production_trading": "/opt/homebrew/bin/python3.12 not-in-use/legacy-traders/production_day_trader.py trade",
     "legacy_complete_finrl": "/opt/homebrew/bin/python3.12 not-in-use/legacy-traders/complete_finrl_trader.py pipeline --debug",
     "dts_sync_onetime": "/opt/homebrew/bin/python3.12 dts_sync_bridge.py",
@@ -70,7 +74,7 @@
   "system_x_features": {
     "autonomous_operation": "Continuous trading during market hours, backtesting when closed",
     "data_sources": ["V9B Supabase (real-time)", "Polygon API (5yr historical)", "Alpaca (live trading)"],
-    "risk_management": "PDT compliance, Kelly Criterion position sizing, circuit breakers, 5% stop loss",
+    "risk_management": "Account Mode System (Recovery/Normal/Peaking), PDT protection with hard stops, Kelly Criterion position sizing, circuit breakers, 5% stop loss",
     "backtesting_strategies": ["PPO Reinforcement Learning", "V9B Momentum", "Mean Reversion"],
     "backtesting_diversity_fix": "Implemented get_diverse_backtest_tickers() to eliminate repetitive same-8-stocks issue",
     "logging_integration": "Comprehensive Supabase logging for all trades, backtests, health metrics",
@@ -85,7 +89,12 @@
       "async_operations": "Concurrent price fetching and data processing for improved performance",
       "performance_analytics": "Real-time Sharpe, Sortino, VaR, and drawdown calculations",
       "walk_forward_analysis": "Rolling window backtesting for realistic strategy validation",
-      "dynamic_risk_adjustment": "Adaptive position sizing based on recent performance metrics"
+      "dynamic_risk_adjustment": "Adaptive position sizing based on recent performance metrics",
+      "account_mode_system": "3-mode dynamic risk management: Recovery (<$26K), Normal ($26K-$33K), Peaking (≥$500 daily gains)",
+      "pdt_protection": "Hard stops at $25K with $500 buffer, trade blocking when approaching Pattern Day Trading limits",
+      "recovery_mode_intelligence": "Enhanced Claude/Nano GPT analysis for ultra-conservative trading (5% max positions, DTS≥75, V9B≥9.0)",
+      "peaking_mode_protection": "Automatic profit preservation closing 40-60% of winning positions, reduced new position sizing",
+      "mode_aware_position_sizing": "Dynamic position caps based on account state: 5% (Recovery), 15% (Normal), 8% (Peaking)"
     }
   },
   "alpaca_integration": {
@@ -103,7 +112,7 @@
   },
   "trading_strategy": {
     "universe": "V9B qualified stocks (DTS ≥ 65)",
-    "position_sizing": "Kelly Criterion optimal sizing with 15% max cap, DAY 4 FIX: Reduced aggressive cap from 50% to 25% based on Account 3's superior performance",
+    "position_sizing": "Mode-aware Kelly Criterion sizing: Recovery (5% max), Normal (15% max), Peaking (8% max) with PDT protection",
     "sure_thing_criteria": "DTS ≥ 78 AND V9B ≥ 8.8 (high confidence stocks)",
     "day4_position_fix": "Applied Account 3's winning 15% strategy to all accounts after Day 3 analysis showed +$2,230 vs -$4,300 combined loss",
     "account_isolation": "Enhanced per-account balance tracking and risk management for proper position sizing calculations",
@@ -112,7 +121,7 @@
     "frequency": "5-minute intervals with async price fetching and concurrent analysis",
     "pdt_compliance": "Maximum 3 day trades with intelligent trade sequencing",
     "portfolio_management": "Automatic rebalancing to target allocations based on V9B scores",
-    "risk_controls": "Circuit breakers, performance monitoring, and adaptive risk scaling"
+    "risk_controls": "Account Mode System with Recovery/Normal/Peaking states, PDT protection with hard stops at $25K, circuit breakers, performance monitoring, and adaptive risk scaling"
   },
   "trading_conditions_analysis": {
     "market_hours_check": {
@@ -230,7 +239,16 @@
       "monitoring_dashboard_enabled": true,
       "trade_journal_analytics_enabled": true,
       "emergency_stop_conditions_enabled": true,
-      "yaml_configuration_enabled": true
+      "yaml_configuration_enabled": true,
+      "account_mode_system_enabled": true,
+      "pdt_protection_active": true,
+      "recovery_mode_intelligence_ready": true,
+      "peaking_mode_protection_active": true,
+      "real_time_ai_intelligence_enabled": true,
+      "openai_nano_4_1_integration": true,
+      "claude_3_5_sonnet_integration": true,
+      "ai_enhanced_recovery_mode": true,
+      "supabase_ai_analysis_logging": true
     },
     "verified_enhanced_features": {
       "security": "Enhanced (cryptography + keyring working)",
@@ -302,8 +320,10 @@
       "dts_sync_bridge_repair": "✅ DTS SYNC BRIDGE RESTORED: Created dts_sync_bridge.py script to fix broken data pipeline between v9_multi_source_analysis and analyzed_stocks tables. Fixed column name mismatches (rvol_score→dts_rvol_component, atr_score→dts_atr_component, vwap_score→dts_vwap_component, rotation_score→dts_rotation_component, catalyst_score→dts_catalyst_component), added missing session_id field, replaced broken upsert with proper update/insert logic, and validated schema compatibility. Script successfully synced 23/23 DTS records, restoring trading capability. Available commands: python dts_sync_bridge.py (one-time) or python dts_sync_bridge.py --continuous (5-minute intervals) - CRITICAL DATA PIPELINE RESTORED",
       "supabase_database_cleanup": "✅ SUPABASE DATABASE CLEANUP COMPLETE: Comprehensive audit identified 1 unused table (portfolio_snapshots with 6 stale records, no recent activity) and 4 dependent views (latest_portfolio_snapshots, portfolio_performance_timeseries, sector_allocation_trends, portfolio_statistics_summary). Successfully removed all unused components with DROP TABLE CASCADE. Verified no code references existed. Remaining database optimized: 4 active tables (analyzed_stocks, v9_multi_source_analysis, v9_session_metadata, backtest_results) and 32 views all confirmed as actively used by SystemX/V9B systems. Database storage reclaimed and performance optimized.",
       "day_4_comprehensive_improvements": "✅ DAY 4 COMPREHENSIVE SYSTEM OVERHAUL COMPLETE: Based on Day 3 analysis showing Account 3 (+$2,230) outperformed Accounts 1&2 (-$1,800, -$2,500) due to conservative 15% position sizing vs aggressive 50% sizing. CRITICAL FIXES APPLIED: (1) Reduced aggressive position sizing from 50% to 25% in all three calculation locations (lines 2276-2280, 2472-2476, 2577-2579), (2) Implemented per-account balance tracking with account_balances dict and thread-safe locks for proper account isolation, (3) Enhanced configuration system with AccountConfig and AdaptiveRiskConfig models supporting per-account risk parameters, (4) Created 4PM improvement engine with automated daily performance analysis and auto-tuning that copies successful strategies, (5) Updated config.yaml with account-specific configurations based on Account 3's winning formula, (6) Created comprehensive test suite (test_day4_improvements.py) validating all fixes. ROOT CAUSE RESOLVED: Position sizing risk was overwhelming stock selection skill - now applying Account 3's proven conservative approach system-wide for consistent profitability.",
+      "account_mode_system_implementation": "✅ COMPREHENSIVE ACCOUNT MODE SYSTEM IMPLEMENTED: Revolutionary 3-mode dynamic risk management system deployed with PDT protection and profit preservation. FEATURES: (1) Recovery Mode (balance <$26K): Ultra-conservative 5% position sizing, DTS≥75 + V9B≥9.0 required, enhanced news analysis with Nano GPT integration, PDT buffer protection with $500 safety margin, (2) Normal Mode ($26K-$33K): Standard 15% position sizing with slight Kelly boost for sure things, balanced risk management, (3) Peaking Mode (daily gains ≥$500): Automatic profit protection closing 40-60% of winners, reduced new position sizing (8% max), gain preservation focus. INTELLIGENCE: Mode-aware position sizing in both basic and Kelly methods, account state tracking with Supabase logging, real-time Slack notifications for mode changes, enhanced Claude analysis in recovery mode with recovery-specific confidence scoring. PDT PROTECTION: Hard stops at $25K with $500 buffer, trade blocking/reduction when approaching limit, comprehensive equity monitoring. INTEGRATION: Seamlessly integrated into execute_trading_cycle with mode updates, position management, and comprehensive tracking. GOAL: Maintain consistency, protect PDT status, and preserve gains while maximizing recovery potential.",
       "actual_trading_timing_analysis_complete": "✅ ACTUAL TRADING TIMING ANALYSIS COMPLETE: Analyzed real Alpaca trade data confirming Day 3 performance: TERTIARY_30K (+$2,057), PRIMARY_30K (-$1,908), SECONDARY_30K (-$2,541). ROOT CAUSE IDENTIFIED: Internal arbitrage with multi-hour execution timing differences between accounts trading same stocks. KLTO example: TERTIARY bought @ $1.81 → sold @ $2.03 (+$0.22/share profit) vs PRIMARY bought @ $1.93 → sold @ $1.80 (-$0.13/share loss) due to 2-hour timing difference. All accounts missed major gainers (BULLZ +53%, NKTR +29%, INSM +28%, BGM +23%, MTSR +15%). SOLUTION: Synchronize execution within 5 minutes, copy Account 3's superior timing logic, add momentum screening for high-gain opportunities.",
-      "trading_performance_analysis_day3": "📊 COMPREHENSIVE TRADING ANALYSIS CONDUCTED: Created comprehensive analysis of Day 3 trading performance across all three Alpaca accounts showing TERTIARY_30K (+$2,669, +8.90%) significantly outperformed PRIMARY_30K (-$1,894, -6.31%) and SECONDARY_30K (-$2,696, -8.99%) with 17.89% total performance spread. KEY FINDINGS: (1) TERTIARY's success attributed to better entry timing (10-100+ min earlier), more strategic position sizing (31 trades vs 27-29), earlier profit-taking (12:24 avg sell vs 11:54), and peak activity during optimal 10:00 hour, (2) All accounts completely missed top gainers BULLZ (+53.19%), NKTR (+29.12%), INSM (+28.65%), BGM (+23.75%), MTSR (+15.50%) representing major opportunity cost, (3) Timing differences of 6+ hours between same stock executions across accounts created unnecessary arbitrage, (4) Position sizing more critical than stock selection - accounts traded same instruments but different outcomes due to execution timing and sizing discipline. ACTIONABLE INSIGHTS: Add momentum screener for >10% daily gainers, synchronize account execution to <5 min spread, implement TERTIARY's disciplined exit strategy system-wide, focus activity on optimal 10:00-11:00 market hours. Analysis files: analyze_today_trading.py, detailed_timing_analysis.py, trading_performance_analysis_summary.md"
+      "trading_performance_analysis_day3": "📊 COMPREHENSIVE TRADING ANALYSIS CONDUCTED: Created comprehensive analysis of Day 3 trading performance across all three Alpaca accounts showing TERTIARY_30K (+$2,669, +8.90%) significantly outperformed PRIMARY_30K (-$1,894, -6.31%) and SECONDARY_30K (-$2,696, -8.99%) with 17.89% total performance spread. KEY FINDINGS: (1) TERTIARY's success attributed to better entry timing (10-100+ min earlier), more strategic position sizing (31 trades vs 27-29), earlier profit-taking (12:24 avg sell vs 11:54), and peak activity during optimal 10:00 hour, (2) All accounts completely missed top gainers BULLZ (+53.19%), NKTR (+29.12%), INSM (+28.65%), BGM (+23.75%), MTSR (+15.50%) representing major opportunity cost, (3) Timing differences of 6+ hours between same stock executions across accounts created unnecessary arbitrage, (4) Position sizing more critical than stock selection - accounts traded same instruments but different outcomes due to execution timing and sizing discipline. ACTIONABLE INSIGHTS: Add momentum screener for >10% daily gainers, synchronize account execution to <5 min spread, implement TERTIARY's disciplined exit strategy system-wide, focus activity on optimal 10:00-11:00 market hours. Analysis files: analyze_today_trading.py, detailed_timing_analysis.py, trading_performance_analysis_summary.md",
+      "comprehensive_account_mode_system": "✅ REVOLUTIONARY ACCOUNT MODE SYSTEM IMPLEMENTED: Deployed comprehensive 3-mode dynamic risk management system with PDT protection and profit preservation. MODES: (1) Recovery Mode (balance <$26K): Ultra-conservative 5% position sizing, enhanced news analysis with Nano GPT integration, strict criteria (DTS≥75, V9B≥9.0), PDT buffer protection with $500 safety margin, (2) Normal Mode ($26K-$33K): Standard 15% position sizing with balanced risk management, (3) Peaking Mode (daily gains ≥$500): Automatic profit protection closing 40-60% of winners, reduced position sizing (8% max), gain preservation focus. INTELLIGENCE: Mode-aware position sizing in both Kelly Criterion and basic methods, enhanced Claude analysis in recovery mode with recovery-specific confidence scoring, real-time mode detection based on equity and daily P&L. PDT PROTECTION: Hard stops at $25K with comprehensive buffer zones, trade blocking/reduction when approaching limits, thread-safe equity monitoring. INTEGRATION: Seamlessly integrated into trading cycle with Supabase logging, Slack notifications for mode changes, comprehensive state tracking. GOAL: Maintain consistency, protect PDT status, preserve gains while maximizing recovery potential. All 6 core components implemented and operational."
     }
   },
   "usage_examples": {

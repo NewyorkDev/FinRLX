@@ -33,7 +33,15 @@ import uuid
 import random
 import logging
 from logging.handlers import RotatingFileHandler
+import asyncio
 warnings.filterwarnings('ignore')
+
+# Real-time AI Intelligence Integration
+try:
+    from ai_intelligence import AIIntelligenceEngine
+    AI_INTELLIGENCE_AVAILABLE = True
+except ImportError:
+    AI_INTELLIGENCE_AVAILABLE = False
 
 # Advanced imports for new features
 try:
@@ -42,6 +50,14 @@ try:
     SECURITY_AVAILABLE = True
 except ImportError:
     SECURITY_AVAILABLE = False
+
+# Account Mode Management for Enhanced Risk Control
+from enum import Enum, auto
+
+class EquityState(Enum):
+    NORMAL = auto()
+    RECOVERY = auto() 
+    PEAKING = auto()
 
 try:
     from sklearn.ensemble import RandomForestClassifier
@@ -714,6 +730,33 @@ class SystemX:
         self.feature_importance = {}
         self.risk_adjustment_factor = 1.0  # Dynamic risk adjustment
         
+        # REAL-TIME AI INTELLIGENCE ENGINE: Enhanced analysis for recovery mode
+        if AI_INTELLIGENCE_AVAILABLE:
+            try:
+                self.ai_engine = AIIntelligenceEngine()
+                self.ai_enabled = True
+                if self.debug:
+                    print("🧠 AI Intelligence Engine initialized successfully")
+            except Exception as e:
+                self.ai_engine = None
+                self.ai_enabled = False
+                if self.debug:
+                    print(f"⚠️ AI Intelligence Engine failed to initialize: {e}")
+        else:
+            self.ai_engine = None
+            self.ai_enabled = False
+            if self.debug:
+                print("⚠️ AI Intelligence not available - install openai and anthropic packages")
+        
+        # ACCOUNT MODE MANAGEMENT: Enhanced PDT protection and dynamic risk adjustment
+        self.equity_state = EquityState.NORMAL
+        self.recovery_trigger = 26000        # Start recovery mode at $26K (1K buffer above PDT)
+        self.peak_trigger = 500              # Daily P&L that triggers peaking mode  
+        self.large_peak_trigger = 1000       # Large daily gains requiring extra protection
+        self.recovery_risk_cut = 0.5         # Reduce Kelly & position sizes by 50% in recovery
+        self.peak_risk_boost = 1.3           # Allow 30% larger sizes when peaking (carefully)
+        self.equity_state_lock = threading.Lock()  # Thread-safe state management
+        
         # Portfolio management
         self.kelly_enabled = True  # Enable Kelly Criterion by default
         self.target_portfolio = {}  # Target allocation percentages
@@ -819,6 +862,11 @@ class SystemX:
                 feature_status.append("📈 Data: Polygon + Alpaca")
             else:
                 feature_status.append("📈 Data: Alpaca Only")
+                
+            if self.ai_enabled:
+                feature_status.append("🧠 AI Intelligence: Real-time Analysis Available")
+            else:
+                feature_status.append("🧠 AI Intelligence: Database Only")
             
             print(f"🔧 Advanced Features Status:")
             for status in feature_status:
@@ -834,6 +882,397 @@ class SystemX:
         except Exception as e:
             self.health_status = "CRITICAL_ERROR"
             self.handle_critical_error("INITIALIZATION_FAILED", e)
+    
+    # =================== ACCOUNT MODE MANAGEMENT ===================
+    
+    def _update_equity_state(self, account_name: str = "PRIMARY_30K") -> None:
+        """Update equity state based on current balance and daily P&L"""
+        try:
+            with self.equity_state_lock:
+                equity = self.get_account_balance(account_name)
+                starting_balance = self.starting_equity.get(account_name, 30000.0)
+                daily_pnl = equity - starting_balance
+                previous_state = self.equity_state
+                
+                # Determine new state based on equity and daily P&L
+                if equity <= self.recovery_trigger:
+                    self.equity_state = EquityState.RECOVERY
+                elif daily_pnl >= self.peak_trigger:
+                    self.equity_state = EquityState.PEAKING
+                else:
+                    self.equity_state = EquityState.NORMAL
+                
+                # Log state changes
+                if previous_state != self.equity_state and self.debug:
+                    self.logger.info(f"⚙️ State change: {previous_state.name} → {self.equity_state.name}")
+                    self.logger.info(f"   Account: {account_name}, Equity: ${equity:,.0f}, Daily P&L: ${daily_pnl:,.0f}")
+                    
+                    # Send immediate Slack notification for critical state changes
+                    if self.equity_state == EquityState.RECOVERY:
+                        self.send_slack_notification(
+                            f"⚠️ {account_name} RECOVERY MODE", 
+                            f"Balance: ${equity:,.0f}\nPDT Buffer: ${equity - 25000:,.0f}\nNeed ${self.recovery_trigger - equity:,.0f} to exit recovery",
+                            force=True
+                        )
+                    elif self.equity_state == EquityState.PEAKING:
+                        self.send_slack_notification(
+                            f"🎯 {account_name} PEAKING MODE!",
+                            f"Daily Gain: ${daily_pnl:,.0f}\nBalance: ${equity:,.0f}\nProtecting profits...",
+                            force=True
+                        )
+                        
+        except Exception as e:
+            self.log_system_event("EQUITY_STATE_ERROR", f"Error updating equity state: {e}")
+    
+    def determine_account_mode(self, account_name: str) -> str:
+        """Determine current mode for an account based on balance and daily P&L"""
+        try:
+            # Get account balance
+            balance = self.get_account_balance(account_name)
+            
+            # Get daily P&L
+            starting_balance = self.starting_equity.get(account_name, 30000.0)
+            daily_pnl = balance - starting_balance
+            
+            # Check for recovery mode (approaching PDT limit)
+            if balance <= self.recovery_trigger:
+                return "recovery"
+            
+            # Check for peaking mode (significant daily gains)
+            elif daily_pnl >= self.peak_trigger:
+                return "peaking"
+            
+            # Normal mode
+            else:
+                return "normal"
+                
+        except Exception as e:
+            self.log_system_event("MODE_DETERMINATION_ERROR", f"Error determining mode for {account_name}: {e}")
+            return "normal"  # Default to normal mode on error
+
+    def get_daily_pnl(self, account_name: str) -> float:
+        """Get daily P&L for specific account"""
+        try:
+            current_balance = self.get_account_balance(account_name)
+            starting_balance = self.starting_equity.get(account_name, 30000.0)
+            return current_balance - starting_balance
+        except Exception:
+            return 0.0
+    
+    def should_use_enhanced_analysis(self, account_name: str) -> bool:
+        """Determine if we should use enhanced news/analysis in recovery mode"""
+        mode = self.determine_account_mode(account_name)
+        return mode == "recovery"
+    
+    def get_enhanced_market_analysis(self, ticker: str, account_name: str) -> Dict:
+        """Get enhanced analysis using multiple sources for recovery mode"""
+        try:
+            if not self.should_use_enhanced_analysis(account_name):
+                # Normal mode - use standard V9B analysis
+                return self.get_v9b_analysis(ticker)
+                
+            # Recovery mode - use all available sources for critical decisions
+            analysis = {
+                'ticker': ticker,
+                'mode': 'recovery_enhanced',
+                'timestamp': datetime.now().isoformat(),
+                'account_name': account_name,
+                'recovery_trigger_reason': f"Account balance approaching PDT limit"
+            }
+            
+            # Get comprehensive V9B analysis
+            v9b_data = self.get_v9b_analysis(ticker)
+            analysis['v9b'] = v9b_data
+            
+            # Enhanced Claude analysis extraction
+            analysis['claude'] = v9b_data.get('claude_analysis', '')
+            analysis['claude_signals'] = v9b_data.get('claude_signals', {})
+            
+            # REAL-TIME AI INTELLIGENCE: Enhanced analysis for recovery mode
+            if self.ai_enabled and self.equity_state == EquityState.RECOVERY:
+                try:
+                    # Get current market data for AI analysis
+                    current_price = self.get_current_price(ticker) or 0
+                    market_data = {
+                        'current_price': current_price,
+                        'volume': v9b_data.get('volume', 0),
+                        'dts_score': v9b_data.get('dts_score', 0),
+                        'v9b_score': v9b_data.get('combined_score', 0)
+                    }
+                    
+                    # Get real-time AI analysis
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        ai_signal = loop.run_until_complete(
+                            self.ai_engine.get_enhanced_analysis(ticker, market_data)
+                        )
+                        if ai_signal:
+                            analysis['real_time_ai'] = {
+                                'confidence_score': ai_signal.confidence_score,
+                                'buy_probability': ai_signal.buy_probability,
+                                'support_levels': ai_signal.support_levels,
+                                'resistance_levels': ai_signal.resistance_levels,
+                                'stop_loss': ai_signal.stop_loss,
+                                'target_price': ai_signal.target_price,
+                                'position_size_rec': ai_signal.position_size_rec,
+                                'risk_warnings': ai_signal.risk_warnings,
+                                'entry_strategy': ai_signal.entry_strategy,
+                                'model_used': ai_signal.model_used,
+                                'timestamp': datetime.now().isoformat()
+                            }
+                            
+                            # Override Claude confidence with real-time AI
+                            if ai_signal.confidence_score > 0:
+                                analysis['claude_signals']['day_trading_confidence'] = ai_signal.confidence_score
+                                analysis['claude_signals']['risk_warnings'] = ai_signal.risk_warnings
+                                
+                            # Log AI analysis to Supabase for tracking
+                            self.log_ai_intelligence_analysis(ticker, account_name, ai_signal, market_data)
+                                
+                            if self.debug:
+                                print(f"🧠 REAL-TIME AI ANALYSIS: {ticker}")
+                                print(f"   AI Confidence: {ai_signal.confidence_score:.1f}/10")
+                                print(f"   Buy Probability: {ai_signal.buy_probability:.1%}")
+                                print(f"   Model: {ai_signal.model_used}")
+                    finally:
+                        loop.close()
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"⚠️ Real-time AI analysis failed for {ticker}: {e}")
+                    # Continue with database analysis
+            
+            # Recovery mode specific checks
+            dts_score = v9b_data.get('dts_score', 0)
+            v9b_confidence = v9b_data.get('combined_score', 0)
+            claude_confidence = analysis['claude_signals'].get('day_trading_confidence', 0) or 0
+            risk_warnings = analysis['claude_signals'].get('risk_warnings', [])
+            
+            # Calculate recovery-specific confidence score
+            recovery_confidence = self.calculate_recovery_confidence(
+                dts_score, v9b_confidence, claude_confidence, risk_warnings
+            )
+            analysis['recovery_confidence'] = recovery_confidence
+            
+            # Recovery mode recommendation (very conservative)
+            if recovery_confidence >= 9.0 and dts_score >= 75 and v9b_confidence >= 9.0:
+                analysis['recovery_recommendation'] = "PROCEED_CAUTIOUSLY"
+                analysis['position_size_override'] = 0.03  # 3% max in recovery
+            elif recovery_confidence >= 8.5 and dts_score >= 70:
+                analysis['recovery_recommendation'] = "MINIMAL_EXPOSURE" 
+                analysis['position_size_override'] = 0.02  # 2% max
+            else:
+                analysis['recovery_recommendation'] = "SKIP_TRADE"
+                analysis['position_size_override'] = 0.0  # No trade
+                analysis['skip_reason'] = f"Insufficient confidence for recovery mode (Score: {recovery_confidence:.1f})"
+            
+            # Log enhanced analysis usage
+            self.log_system_event("RECOVERY_ENHANCED_ANALYSIS", 
+                f"{ticker}: Recovery mode analysis - Confidence: {recovery_confidence:.1f}, "
+                f"Recommendation: {analysis['recovery_recommendation']}")
+            
+            if self.debug:
+                print(f"🔍 RECOVERY ENHANCED ANALYSIS: {ticker}")
+                print(f"   DTS: {dts_score:.1f}, V9B: {v9b_confidence:.1f}, Claude: {claude_confidence}/10")
+                print(f"   Recovery Confidence: {recovery_confidence:.1f}/10")
+                print(f"   Recommendation: {analysis['recovery_recommendation']}")
+                if risk_warnings:
+                    print(f"   Risk Warnings: {', '.join(risk_warnings)}")
+            
+            return analysis
+            
+        except Exception as e:
+            self.log_system_event("ENHANCED_ANALYSIS_ERROR", f"Error getting enhanced analysis for {ticker}: {e}")
+            # Fallback to standard analysis
+            return self.get_v9b_analysis(ticker)
+    
+    def calculate_recovery_confidence(self, dts_score: float, v9b_confidence: float, 
+                                    claude_confidence: float, risk_warnings: List[str]) -> float:
+        """Calculate recovery-specific confidence score for ultra-conservative trading"""
+        try:
+            # Start with base technical confidence
+            base_confidence = (dts_score / 100.0 + v9b_confidence / 10.0) / 2.0 * 10.0
+            
+            # Apply Claude intelligence boost/penalty
+            claude_adjustment = 0.0
+            if claude_confidence > 0:
+                if claude_confidence >= 8.0:
+                    claude_adjustment = 0.5  # Boost for high Claude confidence
+                elif claude_confidence >= 7.0:
+                    claude_adjustment = 0.2  # Small boost
+                elif claude_confidence <= 5.0:
+                    claude_adjustment = -1.0  # Penalty for low confidence
+            
+            # Apply risk warning penalties (more severe in recovery mode)
+            risk_penalty = 0.0
+            high_risk_terms = ['high risk', 'dangerous', 'speculative', 'volatile', 'risky']
+            moderate_risk_terms = ['caution', 'watch', 'uncertain', 'mixed']
+            
+            for warning in risk_warnings:
+                warning_lower = warning.lower()
+                if any(term in warning_lower for term in high_risk_terms):
+                    risk_penalty += 1.5  # Severe penalty for high risk in recovery
+                elif any(term in warning_lower for term in moderate_risk_terms):
+                    risk_penalty += 0.5  # Moderate penalty
+            
+            # Calculate final recovery confidence
+            recovery_confidence = base_confidence + claude_adjustment - risk_penalty
+            
+            # Cap at reasonable bounds (recovery mode should be very conservative)
+            recovery_confidence = max(0.0, min(10.0, recovery_confidence))
+            
+            # Additional penalty if any critical criteria are not met
+            if dts_score < 70 or v9b_confidence < 8.0:
+                recovery_confidence *= 0.7  # 30% reduction for not meeting base criteria
+            
+            return recovery_confidence
+            
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Error calculating recovery confidence: {e}")
+            return 0.0  # Ultra-conservative fallback
+    
+    def manage_peaking_positions(self, account_name: str) -> None:
+        """Manage positions when account is peaking to protect gains"""
+        try:
+            mode = self.determine_account_mode(account_name)
+            if mode != "peaking":
+                return  # Not peaking, no action needed
+                
+            daily_pnl = self.get_daily_pnl(account_name)
+            
+            # Get current positions for this account
+            positions = self.get_current_positions()
+            account_positions = {k: v for k, v in positions.items() if account_name in k}
+            
+            if not account_positions:
+                return  # No positions to manage
+            
+            # Determine protection level based on daily P&L
+            if daily_pnl >= self.large_peak_trigger:  # $1000+ gains
+                protection_percentage = 0.6  # Close 60% of winners for large gains
+                protection_reason = f"LARGE_PEAK_PROTECTION (Daily PnL: ${daily_pnl:.0f})"
+            else:
+                protection_percentage = 0.4  # Close 40% of winners for moderate gains
+                protection_reason = f"PEAK_PROTECTION (Daily PnL: ${daily_pnl:.0f})"
+            
+            protected_positions = 0
+            total_protection_value = 0
+            
+            # Close partial winning positions to protect gains
+            for position_key, position in account_positions.items():
+                if position.get('unrealized_pl', 0) > 0:  # Only protect winning positions
+                    ticker = position['symbol']
+                    current_qty = position['qty']
+                    unrealized_pl = position.get('unrealized_pl', 0)
+                    
+                    # Calculate shares to sell for protection
+                    shares_to_sell = int(current_qty * protection_percentage)
+                    
+                    if shares_to_sell > 0:
+                        current_price = self.get_stock_price(ticker)
+                        if current_price:
+                            try:
+                                success = self.execute_trade(
+                                    ticker, shares_to_sell, 'sell', current_price, 
+                                    protection_reason, account_name
+                                )
+                                if success:
+                                    protected_positions += 1
+                                    total_protection_value += shares_to_sell * current_price
+                                    
+                                    if self.debug:
+                                        remaining_qty = current_qty - shares_to_sell
+                                        print(f"🛡️ Protected {shares_to_sell}/{current_qty} shares of {ticker}")
+                                        print(f"   Unrealized P&L: ${unrealized_pl:.0f}, Remaining: {remaining_qty} shares")
+                                        
+                            except Exception as e:
+                                if self.debug:
+                                    print(f"⚠️ Failed to protect position in {ticker}: {e}")
+                                continue
+            
+            # Log and notify about protection actions
+            if protected_positions > 0:
+                self.log_system_event("PEAKING_PROTECTION", 
+                    f"{account_name}: Protected {protected_positions} positions, "
+                    f"Value: ${total_protection_value:.0f}, Daily PnL: ${daily_pnl:.0f}")
+                
+                # Send Slack notification for significant protection actions
+                if total_protection_value > 1000:
+                    self.send_slack_notification(
+                        f"🛡️ {account_name} Gains Protected",
+                        f"Protected {protected_positions} winning positions\n"
+                        f"Protection Value: ${total_protection_value:,.0f}\n"
+                        f"Daily P&L: ${daily_pnl:,.0f}\n"
+                        f"Reason: {protection_reason}",
+                        force=True
+                    )
+                    
+                if self.debug:
+                    print(f"🛡️ PEAKING PROTECTION: {account_name} protected {protected_positions} positions")
+                    print(f"   Total protection value: ${total_protection_value:,.0f}")
+                    print(f"   Daily P&L: ${daily_pnl:,.0f}")
+            
+        except Exception as e:
+            self.log_system_event("PEAKING_PROTECTION_ERROR", f"Error managing peaking positions for {account_name}: {e}")
+    
+    def update_account_mode_tracking(self, account_name: str) -> None:
+        """Track account mode changes in Supabase with full mode data"""
+        try:
+            mode = self.determine_account_mode(account_name)
+            balance = self.get_account_balance(account_name)
+            daily_pnl = self.get_daily_pnl(account_name)
+            pdt_buffer = balance - 25000
+            
+            # Create comprehensive mode tracking data
+            mode_data = {
+                'id': f"{self.session_id}_{account_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                'session_id': self.session_id,
+                'account_name': account_name,
+                'mode': mode,
+                'balance': balance,
+                'daily_pnl': daily_pnl,
+                'pdt_buffer': pdt_buffer,
+                'timestamp': datetime.now().isoformat(),
+                'is_recovery': mode == "recovery",
+                'is_peaking': mode == "peaking",
+                'recovery_distance': max(0, self.recovery_trigger - balance) if mode == "recovery" else 0,
+                'peak_magnitude': daily_pnl if mode == "peaking" else 0
+            }
+            
+            # Try to insert into dedicated mode tracking table with graceful fallback
+            try:
+                with self.supabase_lock:
+                    self.supabase.table('account_mode_tracking').insert(mode_data).execute()
+                    
+                if self.debug:
+                    print(f"📊 Mode tracking logged: {account_name} - {mode.upper()}")
+                    
+            except Exception as db_error:
+                # Graceful fallback to session metadata table
+                try:
+                    fallback_data = {
+                        'id': mode_data['id'],
+                        'session_id': f"MODE_{mode_data['id']}",
+                        'strategy': f"AccountMode_{mode}",
+                        'status': f"Balance: ${balance:.0f}, PnL: ${daily_pnl:.0f}, Buffer: ${pdt_buffer:.0f}",
+                        'created_at': mode_data['timestamp']
+                    }
+                    with self.supabase_lock:
+                        self.supabase.table('v9_session_metadata').insert(fallback_data).execute()
+                        
+                    if self.debug:
+                        print(f"📊 Mode tracking fallback logged: {account_name} - {mode.upper()}")
+                        
+                except Exception as fallback_error:
+                    if self.debug:
+                        print(f"⚠️ Mode tracking failed for {account_name}: {fallback_error}")
+            
+        except Exception as e:
+            self.log_system_event("MODE_TRACKING_ERROR", f"Error tracking mode for {account_name}: {e}")
+    
+    # =================== END ACCOUNT MODE MANAGEMENT ===================
     
     def setup_logging(self) -> None:
         """Setup logging system with RotatingFileHandler and console output"""
@@ -1944,6 +2383,27 @@ class SystemX:
             # Update all account balances first for proper account isolation
             self.update_all_account_balances()
             
+            # ACCOUNT MODE MANAGEMENT: Update states and manage positions
+            all_modes = {}
+            for account_name in ['PRIMARY_30K', 'SECONDARY_30K', 'TERTIARY_30K']:
+                # Update equity state for this account
+                self._update_equity_state(account_name)
+                
+                # Track mode changes in Supabase
+                self.update_account_mode_tracking(account_name)
+                
+                # Get current mode for display
+                mode = self.determine_account_mode(account_name)
+                all_modes[account_name] = mode
+                
+                # Manage peaking positions if needed
+                if mode == "peaking":
+                    self.manage_peaking_positions(account_name)
+            
+            # Display comprehensive mode summary
+            mode_summary = ', '.join([f"{acc}: {mode.upper()}" for acc, mode in all_modes.items()])
+            print(f"📊 Account Modes: {mode_summary}")
+            
             # Get qualified stocks (individual caching handled per ticker)
             qualified_stocks = self.get_v9b_qualified_stocks()
             if not qualified_stocks:
@@ -2410,6 +2870,46 @@ class SystemX:
                 if self.debug:
                     print(f"⚠️ Using fallback sizing for {account_name}: {max_position:.1%}")
             
+            # ACCOUNT MODE ENHANCEMENT: Apply mode-specific risk adjustments
+            mode = self.determine_account_mode(account_name)
+            mode_multiplier = 1.0  # Default no adjustment
+            
+            if mode == "recovery":
+                # Very conservative in recovery mode - reduce position sizes significantly
+                mode_multiplier = self.recovery_risk_cut  # 50% reduction
+                
+                # Only trade the highest confidence setups in recovery
+                v9b_analysis = self.get_v9b_analysis(ticker)
+                dts_score = v9b_analysis.get('dts_score', 0)
+                v9b_confidence = v9b_analysis.get('combined_score', 0)
+                
+                if dts_score < 75 or v9b_confidence < 9.0:
+                    if self.debug:
+                        print(f"🚫 {account_name} in recovery - skipping {ticker} (DTS: {dts_score}, V9B: {v9b_confidence})")
+                    return 0
+                    
+                if self.debug:
+                    print(f"⚠️ {account_name} RECOVERY MODE - Max position reduced by {(1-mode_multiplier)*100:.0f}%")
+                    
+            elif mode == "peaking":
+                # Protect gains when peaking - slightly reduce new position sizes
+                daily_pnl = self.get_daily_pnl(account_name)
+                if daily_pnl >= self.large_peak_trigger:  # $1000+ gains
+                    mode_multiplier = 0.6  # 40% reduction for very large gains
+                    if self.debug:
+                        print(f"🎯 {account_name} LARGE PEAKING - Major position reduction (Daily: ${daily_pnl:.0f})")
+                else:
+                    mode_multiplier = 0.8  # 20% reduction for moderate gains
+                    if self.debug:
+                        print(f"🎯 {account_name} PEAKING MODE - Protecting ${daily_pnl:.0f} gain")
+            else:
+                # Normal mode - no adjustment needed
+                if self.debug and datetime.now().minute % 30 == 0:  # Log every 30 minutes
+                    print(f"📊 {account_name} NORMAL MODE - Standard position sizing")
+            
+            # Apply mode multiplier to max position
+            max_position *= mode_multiplier
+            
             # CLAUDE INTELLIGENCE ENHANCEMENT: Apply Claude confidence to basic sizing
             claude_confidence_boost = 1.0  # Default no boost
             try:
@@ -2454,6 +2954,26 @@ class SystemX:
             
             # Calculate shares
             shares = int(max_spend / price)
+            
+            # PDT PROTECTION: Absolute hard stop at $25,000 limit
+            client = self.get_client(account_name)
+            account_info = client.get_account()
+            current_equity = float(account_info.equity)
+            trade_value = shares * price
+            
+            # Check if this trade would bring us too close to PDT limit
+            if current_equity - trade_value < 25000:
+                # Reduce shares to stay above PDT limit with buffer
+                max_safe_value = max(0, current_equity - 25500)  # Keep $500 buffer above PDT
+                shares = int(max_safe_value / price) if price > 0 else 0
+                
+                if self.debug and shares == 0:
+                    print(f"🛑 PDT PROTECTION: {account_name} trade blocked - would breach $25K limit")
+                    print(f"   Current Equity: ${current_equity:,.0f}, Trade Value: ${trade_value:,.0f}")
+                elif self.debug and shares < int(max_spend / price):
+                    original_shares = int(max_spend / price)
+                    print(f"⚠️ PDT PROTECTION: {account_name} position reduced from {original_shares} to {shares} shares")
+                    print(f"   Maintaining ${current_equity - shares * price:,.0f} equity (${current_equity - shares * price - 25000:,.0f} buffer)")
             
             return max(0, shares)
             
@@ -2631,6 +3151,48 @@ class SystemX:
                 
             base_fraction = min(valid_constraints)
             
+            # ACCOUNT MODE ENHANCEMENT: Apply mode-specific Kelly adjustments
+            mode = self.determine_account_mode(account_name)
+            mode_kelly_multiplier = 1.0  # Default no adjustment
+            
+            if mode == "recovery":
+                # Very conservative Kelly in recovery mode
+                mode_kelly_multiplier = self.recovery_risk_cut  # 50% reduction
+                
+                # Additional safety check - only proceed with highest confidence
+                v9b_analysis = self.get_v9b_analysis(ticker)
+                dts_score = v9b_analysis.get('dts_score', 0)
+                v9b_confidence = v9b_analysis.get('combined_score', 0)
+                
+                if dts_score < 75 or v9b_confidence < 9.0:
+                    if self.debug:
+                        print(f"🚫 Kelly: {account_name} in recovery - skipping {ticker} (DTS: {dts_score}, V9B: {v9b_confidence})")
+                    return 0
+                    
+                if self.debug:
+                    print(f"⚠️ Kelly: {account_name} RECOVERY MODE - Kelly fraction reduced by {(1-mode_kelly_multiplier)*100:.0f}%")
+                    
+            elif mode == "peaking":
+                # Protect gains in peaking mode
+                daily_pnl = self.get_daily_pnl(account_name)
+                if daily_pnl >= self.large_peak_trigger:  # $1000+ gains
+                    mode_kelly_multiplier = 0.5  # 50% Kelly reduction for very large gains
+                    if self.debug:
+                        print(f"🎯 Kelly: {account_name} LARGE PEAKING - Major Kelly reduction (Daily: ${daily_pnl:.0f})")
+                else:
+                    mode_kelly_multiplier = 0.7  # 30% Kelly reduction for moderate gains  
+                    if self.debug:
+                        print(f"🎯 Kelly: {account_name} PEAKING MODE - Protecting ${daily_pnl:.0f} gain")
+            else:
+                # Normal mode - allow slightly higher Kelly (controlled aggression)
+                if is_sure_thing:
+                    mode_kelly_multiplier = 1.1  # 10% boost for sure things in normal mode
+                    if self.debug:
+                        print(f"📊 Kelly: {account_name} NORMAL MODE - Sure thing Kelly boost")
+            
+            # Apply mode multiplier to base fraction
+            base_fraction *= mode_kelly_multiplier
+            
             # CLAUDE INTELLIGENCE ENHANCEMENT: Get Claude signals for enhanced position sizing
             claude_confidence_boost = 1.0  # Default no boost
             try:
@@ -2746,6 +3308,23 @@ class SystemX:
                 print(f"   Sure Thing: {'YES' if is_sure_thing else 'NO'}, Kelly Cap: {kelly_cap:.1%}, Max Position: {max_position_override:.1%}")
                 print(f"   Constraints: kelly={kelly_fraction:.3f}, max_pos={max_position_override:.1%}, max_exp={self.max_total_exposure:.1%}")
                 print(f"   Account: ${available_cash:,.0f} cash, ${total_equity:,.0f} equity")
+            
+            # PDT PROTECTION: Absolute hard stop at $25,000 limit (Kelly method)
+            trade_value = shares * price
+            
+            # Check if this trade would bring us too close to PDT limit
+            if total_equity - trade_value < 25000:
+                # Reduce shares to stay above PDT limit with buffer
+                max_safe_value = max(0, total_equity - 25500)  # Keep $500 buffer above PDT
+                original_shares = shares
+                shares = int(max_safe_value / price) if price > 0 else 0
+                
+                if self.debug and shares == 0:
+                    print(f"🛑 Kelly PDT PROTECTION: {account_name} trade blocked - would breach $25K limit")
+                    print(f"   Total Equity: ${total_equity:,.0f}, Trade Value: ${trade_value:,.0f}")
+                elif self.debug and shares < original_shares:
+                    print(f"⚠️ Kelly PDT PROTECTION: {account_name} position reduced from {original_shares} to {shares} shares")
+                    print(f"   Maintaining ${total_equity - shares * price:,.0f} equity (${total_equity - shares * price - 25000:,.0f} buffer)")
             
             return max(0, shares)
             
@@ -5265,6 +5844,44 @@ class SystemX:
         # Always use local logging to avoid Supabase table constraint issues
         log_entry = f"[{datetime.now().isoformat()}] {event_type}: {event_data}"
         print(f"📝 {log_entry}")
+    
+    def log_ai_intelligence_analysis(self, ticker: str, account_name: str, ai_signal, market_data: Dict):
+        """Log real-time AI intelligence analysis to Supabase"""
+        try:
+            analysis_data = {
+                'ticker': ticker,
+                'account_name': account_name,
+                'analysis_timestamp': datetime.now().isoformat(),
+                'confidence_score': ai_signal.confidence_score,
+                'buy_probability': ai_signal.buy_probability,
+                'support_levels': ai_signal.support_levels,
+                'resistance_levels': ai_signal.resistance_levels,
+                'stop_loss': ai_signal.stop_loss,
+                'target_price': ai_signal.target_price,
+                'position_size_rec': ai_signal.position_size_rec,
+                'entry_strategy': ai_signal.entry_strategy,
+                'risk_warnings': ai_signal.risk_warnings,
+                'current_price': market_data.get('current_price'),
+                'volume': market_data.get('volume'),
+                'dts_score': market_data.get('dts_score'),
+                'v9b_score': market_data.get('v9b_score'),
+                'model_used': ai_signal.model_used,
+                'ai_reasoning': ai_signal.ai_reasoning[:1000] if ai_signal.ai_reasoning else None,  # Truncate long text
+                'equity_state': self.equity_state.name,
+                'session_id': self.session_id,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            # Insert into Supabase
+            result = self.supabase.table('ai_intelligence_analysis').insert(analysis_data).execute()
+            
+            if self.debug:
+                print(f"📊 AI analysis logged to Supabase for {ticker}")
+                
+        except Exception as e:
+            if self.debug:
+                print(f"⚠️ Failed to log AI analysis to Supabase: {e}")
+            # Continue without failing - logging is not critical
         
         # Skip all Supabase logging to avoid constraint issues
         # All logging is done locally for System X reliability
